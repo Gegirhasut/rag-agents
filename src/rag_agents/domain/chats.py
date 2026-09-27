@@ -28,6 +28,8 @@ class MessageOut(BaseModel):
     citations: list[dict[str, Any]] | None
     refused: bool | None
     usage: dict[str, Any] | None
+    trace_id: str | None = None
+    feedback: int | None = None
     created_at: datetime
 
 

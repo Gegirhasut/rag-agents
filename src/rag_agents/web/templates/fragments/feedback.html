@@ -1,0 +1,10 @@
+{# 👍/👎 под ответом. После клика сервер возвращает этот же фрагмент с выбранным состоянием. #}
+<div class="feedback mt-2" id="fb-{{ message_id }}">
+  {% for value, icon, title in [(1, '👍', 'Полезный ответ'), (-1, '👎', 'Плохой ответ')] %}
+  <button type="button" title="{{ title }}"
+          class="btn btn-sm {{ 'btn-secondary' if feedback == value else 'btn-outline-secondary' }} py-0 px-2"
+          hx-post="/agents/{{ agent_id }}/messages/{{ message_id }}/feedback"
+          hx-vals='{"value": "{{ value }}"}' hx-target="#fb-{{ message_id }}" hx-swap="outerHTML"
+          {% if feedback == value %}aria-pressed="true"{% endif %}>{{ icon }}</button>
+  {% endfor %}
+</div>

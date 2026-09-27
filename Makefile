@@ -5,7 +5,7 @@ TEST_COMPOSE := docker compose -f compose.test.yaml
 TEST_ENV := DATABASE_URL=postgresql+asyncpg://rag_test:rag_test@127.0.0.1:15432/rag_test \
             QDRANT_URL=http://127.0.0.1:16333 APP_ENV=test
 
-.PHONY: help up up-debug down build logs ps migrate seed sh lint fmt test test-unit test-integration test-up test-down smoke
+.PHONY: help up up-debug down build logs ps migrate seed sh lint fmt test test-unit test-integration test-up test-down smoke langfuse-check langfuse-model langfuse-trace
 
 help:
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -65,3 +65,12 @@ test: test-unit test-integration ## все тесты
 
 smoke: ## e2e по живому стенду: агент → txt → done → вопрос → стрим
 	$(UV) run python scripts/smoke.py $(if $(FILE),--file "$(FILE)",)
+
+langfuse-check: ## Langfuse: auth + тестовый трейс, ждём его появления в API
+	$(UV) run python scripts/langfuse_check.py ping
+
+langfuse-model: ## Langfuse: завести цену LLM_MODEL (идемпотентно)
+	$(UV) run python scripts/langfuse_check.py ensure-model
+
+langfuse-trace: ## Langfuse: дерево, токены и cost трейса: make langfuse-trace id=<trace_id>
+	$(UV) run python scripts/langfuse_check.py trace $(id)

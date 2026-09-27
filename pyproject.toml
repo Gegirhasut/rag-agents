@@ -27,6 +27,7 @@ dependencies = [
     "uuid-utils>=0.9",
     "anyio>=4.4",
     "numpy>=2.0",
+    "langfuse>=4.15",
 ]
 
 [dependency-groups]

@@ -7,3 +7,4 @@
 .source-snippet { max-height: 6.5em; overflow: hidden; }
 .answer-body p:last-child { margin-bottom: 0; }
 a.cite { text-decoration: none; font-size: .85em; vertical-align: super; }
+.feedback .btn { line-height: 1.4; }

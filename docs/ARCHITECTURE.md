@@ -264,6 +264,19 @@ sequenceDiagram
 
 **Почему отдельный сервис.** Модель на ~1 ГБ RAM нельзя грузить в каждый uvicorn-воркер. У отдельного сервиса свой лимит памяти, свой `cpus`, своя метрика латентности, и его можно отключить. Web вызывает его с таймаутом и при ошибке деградирует до порядка RRF.
 
+### ADR-9. Трейсинг Langfuse — явные span-ы через свой протокол `Tracer`, cost считает Langfuse
+**Решение** (мини-итерация 1.5, 2026-09-27; в PLAN Langfuse стоял в итерации 4, вынесен раньше — от итераций 2–3 не зависит).
+- `core/observability.py`: протокол `Tracer` / `Span` с реализациями `LangfuseTracer` (SDK v4, OTel) и `NoopTracer` (нет ключей или `APP_ENV=test`). Сервисы не проверяют «включено ли».
+- **Явные span-объекты, а не `@observe`.** Ответ стримится из async-генератора внутри отдельной задачи (`with_heartbeat`). Неявный OTel-контекст через `yield` легко потерять, а явный родитель надёжен и легко тестируется фейком (`tests/fakes.py::RecordingTracer`).
+- SDK v4 задаёт атрибуты трейса (`user_id`, `session_id`, `tags`) только через контекстный `propagate_attributes`. Обёртка создаёт **каждый** span внутри короткого `with propagate_attributes(...)`, поэтому атрибуты есть на всех наблюдениях, и агрегаты Langfuse по user и session считаются корректно.
+- `trace_id` детерминирован: `sha256(seed)[:16]` (`Langfuse.create_trace_id(seed=…)`). Для вопроса seed — `query:{message_id}`, для ingest — `ingest:{document_id}:{attempt}`. Трейс находится без поиска, а в итерации 3, когда ingest разойдётся на несколько задач, они смогут писать в общий трейс.
+- Ошибки SDK не ломают сценарий: каждый вызов обёрнут, в лог пишется только warning `langfuse.error`. `end()` идемпотентен.
+- **Стоимость** считает Langfuse по model definition `deepseek-flash` (`make langfuse-model`): usage передаётся ключами `input` (без кэша), `input_cache_read`, `output`. У DeepSeek два тарифа, peak и off-peak (off-peak вдвое дешевле), а Langfuse не умеет цены по времени суток. Поэтому в definition заведены **peak**-цены, и cost в Langfuse — оценка сверху. Точный `cost_usd` по `llm_prices.yaml` с учётом времени — итерация 7 (§12). Тогда он начнёт передаваться в `cost_details` и перекроет расчёт Langfuse. Reasoning-токены DeepSeek уже входят в `completion_tokens`, поэтому пишутся только в metadata, чтобы не посчитать их дважды.
+- Клиент Langfuse держит фоновый поток экспорта, поэтому в Celery он создаётся в дочернем процессе (`worker_process_init` → `build_container`), а не в родителе до fork. Flush делают `Container.aclose()` (lifespan uvicorn, `worker_process_shutdown`) и конец каждого ingest.
+- **Чтение трейсов через API:** для организаций, созданных после 16.09.2026, `GET /api/public/traces` отключён (HTTP 410, legacy). Скрипт проверки читает `GET /api/public/v2/observations?traceId=…` и `GET /api/public/v3/scores`.
+
+**Альтернативы.** `@observe` и `start_as_current_observation` — меньше кода, но контекст теряется в стриме (см. выше). OpenLLMetry или OTel-инструментация httpx — нет контроля над тем, что уходит (тексты документов в ingest-трейс писать нельзя).
+
 ---
 
 ## 4. Слои и структура кода
@@ -616,6 +629,7 @@ class LLMProvider(Protocol):
 | GET | `/agents/{id}/chats/{cid}` | страница чата | `cid=new` создаёт чат |
 | POST | `/agents/{id}/chats/{cid}/messages` | фрагмент: вопрос + пустой пузырь ответа с `sse-connect` | |
 | GET | `/agents/{id}/messages/{mid}/stream` | `text/event-stream` | см. §6.3 |
+| POST | `/agents/{id}/messages/{mid}/feedback` | фрагмент кнопок 👍/👎 с выбранной | `value=1\|-1`; только завершённый ответ; score в Langfuse (§14.2) |
 | GET | `/agents/{id}/chunks/{chunk_id}` | фрагмент-поповер источника | для `[n]` |
 | GET | `/admin/dlq`, POST `/admin/dlq/{queue}/replay` | страница / 303 | только админ |
 | GET | `/healthz`, `/readyz`, `/metrics` | | `/metrics` — только из docker-сети |
@@ -962,7 +976,9 @@ CREATE TABLE messages (
   citations jsonb,                              -- list[Citation]
   refused boolean, grounded boolean,
   usage jsonb,                                  -- AnswerUsage
-  prompt_version text, index_id uuid, trace_id text,
+  prompt_version text, index_id uuid,
+  trace_id text,                                -- Langfuse trace (32 hex), детерминирован от id
+  feedback smallint CHECK (feedback IS NULL OR feedback IN (-1, 1)),  -- 👍 = 1, 👎 = -1
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ON messages (chat_id, created_at);
@@ -1252,12 +1268,24 @@ Healthchecks у всех хранилищ. `depends_on: condition: service_healt
 - Контекст через `contextvars`: `request_id` (middleware, заголовок `X-Request-ID`), `user_id`, `agent_id`, `document_id`, `task_id`, `trace_id`. Celery-сигналы `task_prerun/postrun` пробрасывают контекст в воркеры. `request_id` передаётся в заголовках сообщения.
 - Тексты вопросов и чанков в логи не пишем (только длины и хэши). Полный контент — в Langfuse.
 
-### 14.2 Трейсы — Langfuse (Cloud)
-- SDK v3 (OpenTelemetry-based), `@observe` на шагах. Трейс на вопрос: `condense → embed_query → hybrid_search → rerank → build_context → llm_generate`, на спанах — k, скоры, латентности, токены, стоимость, провайдер, флаг fallback.
-- Ingest-трейс на документ (без текстов): тайминги этапов, число чанков и батчей.
-- `trace_id` сохраняется в `messages`, а из UI сообщения есть ссылка «открыть трейс» (для админа).
-- Eval-прогоны пишут датасет и скоры в Langfuse Datasets (дублируя PG) для сравнения экспериментов в UI Langfuse.
-- Если ключей Langfuse нет, SDK отключён (no-op), и приложение работает.
+### 14.2 Трейсы — Langfuse (Cloud, EU)
+Реализовано в мини-итерации 1.5 (решения — ADR-9). Настройки: `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL` (fallback — старое имя `LANGFUSE_HOST`, по умолчанию `https://cloud.langfuse.com`). Если ключей нет, или `APP_ENV=test`, или `LANGFUSE_ENABLED=false`, работает `NoopTracer`.
+
+**Трейс на вопрос** `query` (`QueryService._generate`):
+- атрибуты трейса: `session_id` = id чата, `user_id` = владелец, `tags` = [имя агента], `environment` = `APP_ENV`; input = вопрос, output = ответ; metadata: `agent_id`, `message_id`, `prompt_version`, `refused`;
+- `embed_query` (embedding): модель, размерность;
+- `qdrant_search` (retriever): input — `agent_id`, коллекция, `top_k`, режим; output — `chunk_id`, `document_id`, `score`, книга и глава каждого хита;
+- `llm_generate` (generation): messages промпта, ответ, `model`, `model_parameters` (temperature, max_tokens, **reasoning_effort**), `usage_details` (`input`, `input_cache_read`, `output`), `completion_start_time` (TTFT), в metadata — `reasoning_tokens`, провайдер. Cost Langfuse считает по model definition;
+- ошибки: `level=ERROR` + `status_message`; закрытие вкладки: `WARNING client_cancelled`;
+- `trace_id` сохраняется в `messages.trace_id`. Ссылка «открыть трейс» в UI для админа появится с auth (итерация 2).
+
+**Трейс ingest** `ingest` (одна попытка задачи, `IngestService`): `session_id` = `document-{id}` (ретраи лежат рядом), `user_id` = владелец агента, `tags` = [имя агента, `ingest`]. Span-ы: `parse` → `chunk` → `save_chunks` → `embed_upsert` (внутри по очереди `embed_batch i/n` и `upsert_batch i/n`) → `finalize`. На span-ах только числа: секции, чанки, средние и максимальные токены, размер батча, мс. Output корня: `chunks_total`, `batches`, `embed_ms`, `upsert_ms`, `duration_ms`. **Тексты документов в ingest-трейс не пишем.**
+
+**Оценка пользователя.** Кнопки 👍/👎 под ответом → `messages.feedback` (источник правды) + score `user_feedback` (BOOLEAN: 1 = 👍, 0 = 👎) на трейсе ответа. `score_id = feedback-{message_id}`: повторный клик перезаписывает score, дубля не будет.
+
+**Проверка:** `make langfuse-check` (auth + тестовый трейс, ждём его в API), `make langfuse-model` (цена `LLM_MODEL`, идемпотентно), `make langfuse-trace id=<trace_id>` (дерево, токены, cost, score-ы).
+
+**Дальше (итерация 4):** rerank и build_context как отдельные span-ы, eval-прогоны в Langfuse Datasets (дублируя PG) для сравнения экспериментов в UI.
 
 ### 14.3 Метрики — Prometheus-формат (`prometheus_client`)
 - `http_requests_total{route,method,status}`, `http_request_seconds` (histogram).

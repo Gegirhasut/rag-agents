@@ -28,7 +28,9 @@ def ingest_document(self: "Task[Any, Any]", payload: dict[str, Any]) -> None:
     try:
         runtime.run(
             runtime.container().ingest.ingest(
-                task, final_attempt=self.request.retries >= MAX_RETRIES
+                task,
+                final_attempt=self.request.retries >= MAX_RETRIES,
+                attempt=self.request.retries,
             )
         )
     finally:

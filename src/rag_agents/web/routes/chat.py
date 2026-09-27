@@ -1,6 +1,6 @@
 import html
 from collections.abc import AsyncIterator
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 import structlog
@@ -51,7 +51,7 @@ async def post_message(
     )
 
 
-def _render_event(message_id: UUID, ev: StreamEvent) -> tuple[str, str]:
+def _render_event(agent_id: UUID, message_id: UUID, ev: StreamEvent) -> tuple[str, str]:
     """StreamEvent → (имя SSE-события, HTML-фрагмент для htmx-ext-sse)."""
     anchor = f"src-{message_id}"
     match ev:
@@ -68,6 +68,9 @@ def _render_event(message_id: UUID, ev: StreamEvent) -> tuple[str, str]:
                 answer_html=render_answer(r.answer_md, anchor, len(r.citations)),
                 result=r,
                 anchor=anchor,
+                agent_id=agent_id,
+                message_id=message_id,
+                feedback=None,
             )
             return "done", body
         case ErrorEvent():
@@ -88,7 +91,7 @@ async def stream_message(
     async def sse() -> AsyncIterator[str]:
         n = 0
         async for ev in events:
-            name, data = _render_event(message_id, ev)
+            name, data = _render_event(agent_id, message_id, ev)
             n += 1
             yield format_sse(name, data, event_id=n)
 
@@ -96,4 +99,25 @@ async def stream_message(
         with_heartbeat(sse()),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/agents/{agent_id}/messages/{message_id}/feedback", response_class=HTMLResponse)
+async def post_feedback(
+    request: Request,
+    agent_id: UUID,
+    message_id: UUID,
+    c: ContainerDep,
+    owner: OwnerDep,
+    value: Annotated[Literal["1", "-1"], Form()],
+) -> Response:
+    """👍/👎: оценка в PG и score в Langfuse; в ответ — тот же фрагмент с выбранной кнопкой."""
+    try:
+        msg = await c.query.feedback(owner, agent_id, message_id, 1 if value == "1" else -1)
+    except NotFoundError as e:
+        raise HTTPException(404, "Сообщение не найдено") from e
+    return templates.TemplateResponse(
+        request,
+        "fragments/feedback.html",
+        {"agent_id": agent_id, "message_id": msg.id, "feedback": msg.feedback},
     )

@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ReasoningEffort = Literal["low", "high", "max"]
@@ -58,12 +58,42 @@ class Settings(BaseSettings):
     # или закрыть админ-доступом (итерация 2): на странице видны скоры и метаданные книг.
     trace_enabled: bool = True
 
+    # Langfuse Cloud (EU). Без обоих ключей трейсинг выключен (no-op). LANGFUSE_HOST — старое
+    # имя переменной у Langfuse SDK, поддерживаем как fallback.
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_base_url: str = Field(
+        "https://cloud.langfuse.com",
+        validation_alias=AliasChoices("LANGFUSE_BASE_URL", "LANGFUSE_HOST"),
+    )
+    langfuse_enabled: bool = True
+
     @field_validator(
-        "llm_reasoning_effort", "deepseek_api_key", "embedding_num_thread", mode="before"
+        "llm_reasoning_effort",
+        "deepseek_api_key",
+        "embedding_num_thread",
+        "langfuse_public_key",
+        "langfuse_secret_key",
+        mode="before",
     )
     @classmethod
     def _empty_is_none(cls, v: object) -> object:
         return None if isinstance(v, str) and not v.strip() else v
+
+    @field_validator("langfuse_base_url", mode="before")
+    @classmethod
+    def _empty_base_url_is_cloud_eu(cls, v: object) -> object:
+        return "https://cloud.langfuse.com" if isinstance(v, str) and not v.strip() else v
+
+    @property
+    def langfuse_active(self) -> bool:
+        """Тесты никогда не шлют трейсы, даже если ключи лежат в локальном .env."""
+        return (
+            self.langfuse_enabled
+            and self.app_env != "test"
+            and self.langfuse_public_key is not None
+            and self.langfuse_secret_key is not None
+        )
 
     @property
     def max_upload_bytes(self) -> int:

@@ -32,6 +32,18 @@ UI: <http://192.168.56.10:8080> (с Windows-хоста) или <http://localhost
 
 Под каждым ответом в UI видно модель, effort, время первого токена и число токенов (в т. ч. reasoning) — удобно сравнивать `low` и `high`. После смены значения: `docker compose up -d web`.
 
+## Трейсы (Langfuse Cloud)
+
+В `.env` задайте `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` и `LANGFUSE_BASE_URL` (EU: `https://cloud.langfuse.com`; старое имя `LANGFUSE_HOST` тоже читается). Без ключей трейсинг выключен, и всё работает как раньше.
+
+```bash
+make langfuse-check              # связь: тестовый трейс отправлен и виден через API
+make langfuse-model              # один раз: цена LLM_MODEL в Langfuse (для расчёта cost)
+make langfuse-trace id=<trace>   # дерево span-ов, токены, cost и 👍/👎 трейса
+```
+
+Трейс создаётся на каждый вопрос (поиск, эмбеддинг, генерация DeepSeek) и на каждую индексацию документа. Кнопки 👍/👎 под ответом становятся score `user_feedback` на трейсе ответа. Подробности — [ARCHITECTURE §14.2](docs/ARCHITECTURE.md#142-трейсы--langfuse-cloud-eu).
+
 ## Как проверить итерацию 1 руками
 
 Критерии готовности — [PLAN, итерация 1](docs/PLAN.md#итерация-1--сквозной-скелет-34-дня).

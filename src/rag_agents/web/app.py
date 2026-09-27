@@ -26,7 +26,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Итерация 1: без авторизации, все агенты принадлежат seed-пользователю (auth — итерация 2)
     app.state.owner_id = await container.agents.ensure_user(settings.seed_user_email)
     app.state.container = container
-    log.info("web.started", llm_model=settings.llm_model, effort=settings.llm_reasoning_effort)
+    log.info(
+        "web.started",
+        llm_model=settings.llm_model,
+        effort=settings.llm_reasoning_effort,
+        langfuse=container.tracer.enabled,
+    )
     yield
     await container.aclose()
 

@@ -41,6 +41,18 @@ migrations/  templates/  static/  tests/
 
 ---
 
+## Мини-итерация 1.5 — Langfuse Cloud (сделано 2026-09-27)
+
+Вынесено из итерации 4 (задача 1): от auth и ingest-очередей не зависит, а трейсы нужны уже сейчас для разбора ответов. Детали — ARCHITECTURE ADR-9 и §14.2.
+- Трейс на вопрос: `embed_query` → `qdrant_search` → `llm_generate` (токены, TTFT, reasoning effort, cost по model definition); session = чат, user = владелец, tags = агент.
+- Трейс ingest: `parse` → `chunk` → `save_chunks` → `embed_upsert` (батчи) → `finalize`, без текстов.
+- 👍/👎 под ответом → `messages.feedback` + score `user_feedback` (миграция `0002`).
+- No-op без ключей и в тестах; flush при остановке web и воркера. Проверка: `make langfuse-check`, `make langfuse-model`, `make langfuse-trace id=…`.
+
+**Долг перед итерацией 3:** когда ingest разойдётся на задачи parse и embed, трейс собирается по детерминированному `trace_id` от `document_id`.
+
+---
+
 ## Итерация 2 — Фундамент: auth, API, статусы, CI (3 дня)
 
 **Цель.** Проект выглядит как продукт: вход по паролю, JSON API с ключами, живые статусы, CI.
@@ -100,7 +112,7 @@ workers/tasks/{parse.py, embed.py, maintenance.py, sweeper.py}; workers/{queues.
 **Цель.** До любого тюнинга есть воспроизводимая оценка качества и трейсы каждого запроса.
 
 **Задачи**
-1. Langfuse Cloud: SDK, `@observe` на этапах query, trace_id в `messages`, ingest-трейсы. No-op, если ключей нет.
+1. ~~Langfuse Cloud: SDK, трейсы query и ingest, trace_id в `messages`, no-op без ключей~~ — **сделано раньше, в мини-итерации 1.5** (2026-09-27, ARCHITECTURE ADR-9 и §14.2), плюс 👍/👎 → score. В итерации 4 остаётся: span-ы rerank и build_context, выгрузка eval в Langfuse Datasets.
 2. Golden-датасет `eval/datasets/tolstoy.jsonl`: 40–60 вопросов, 4 категории (ARCHITECTURE §15.1), включая `out_of_corpus` (≥ 20 %, это нужно для калибровки порога) и `injection`.
 3. Eval runner (`python -m rag_agents.eval`): вызывает `QueryService` напрямую, считает retrieval-метрики (hit@k, recall@k, MRR), RAGAS (faithfulness, answer relevancy, context precision и recall) с judge DeepSeek, метрики отказов и цитат, латентности, $. Парный bootstrap для сравнения двух прогонов.
 4. Runner сохраняет `max_rerank_score` / `max_dense_score` каждого вопроса: это сырьё для калибровки в итерации 5.

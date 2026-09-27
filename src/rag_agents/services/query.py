@@ -1,6 +1,8 @@
 import asyncio
 import time
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from typing import Literal
 from uuid import UUID
 
 import structlog
@@ -8,6 +10,7 @@ import structlog
 from rag_agents.core.config import Settings
 from rag_agents.core.db import Database
 from rag_agents.core.errors import PermanentError, TransientError
+from rag_agents.core.observability import Span, Tracer
 from rag_agents.domain.agents import AgentOut
 from rag_agents.domain.answers import (
     AnswerUsage,
@@ -55,8 +58,10 @@ class QueryService:
         llm: LLMProvider,
         trace: TraceBus,
         settings: Settings,
+        tracer: Tracer,
     ) -> None:
         self.db = db
+        self.tracer = tracer
         self.embedder = embedder
         self.index = index
         self.llm = llm
@@ -135,7 +140,7 @@ class QueryService:
             await uow.commit()
         if not claimed:
             return self._replay(msg)
-        return self._generate(agent, message_id, question or "")
+        return self._generate(agent, owner_id, msg.chat_id, message_id, question or "")
 
     async def _replay(self, msg: MessageOut) -> AsyncIterator[StreamEvent]:
         """Повторное подключение EventSource: генерацию заново не запускаем (ARCHITECTURE §6.3)."""
@@ -156,13 +161,41 @@ class QueryService:
                 retryable=True,
             )
 
+    async def feedback(
+        self, owner_id: UUID, agent_id: UUID, message_id: UUID, value: Literal[1, -1]
+    ) -> MessageOut:
+        """👍/👎 под ответом: PG — источник правды, в Langfuse — score на трейсе ответа.
+
+        score_id детерминирован по сообщению: повторный клик перезаписывает оценку, а не дублирует.
+        """
+        await self._agent(owner_id, agent_id)
+        async with self.db.uow() as uow:
+            msg = await ChatRepository(uow.session).set_feedback(
+                agent_id, owner_id, message_id, value
+            )
+            if msg is None:
+                raise NotFoundError("message")
+            await uow.commit()
+        if msg.trace_id:
+            self.tracer.score(
+                trace_id=msg.trace_id,
+                name="user_feedback",
+                value=1.0 if value > 0 else 0.0,
+                score_id=f"feedback-{message_id}",
+                data_type="BOOLEAN",
+            )
+        log.info("query.feedback", message_id=str(message_id), value=value)
+        return msg
+
     async def _generate(
-        self, agent: AgentOut, message_id: UUID, question: str
+        self, agent: AgentOut, owner_id: UUID, chat_id: UUID, message_id: UUID, question: str
     ) -> AsyncIterator[StreamEvent]:
         t0 = time.monotonic()
         parts: list[str] = []
         citations: list[Citation] = []
         log.info("query.start", agent_id=str(agent.id), message_id=str(message_id))
+        root = self._start_trace(agent, owner_id, chat_id, message_id, question)
+        generation: Span | None = None
         try:
             await self.trace.emit(
                 "query.stream",
@@ -171,29 +204,11 @@ class QueryService:
                 "EventSource: SSE-стрим ответа открыт",
                 agent_id=agent.id,
             )
-            chunks = await self._retrieve(agent, question)
+            chunks = await self._retrieve(agent, question, root)
             t_retrieval = _ms(t0)
 
             if not chunks:
-                usage = AnswerUsage(
-                    provider="none",
-                    model="none",
-                    reasoning_effort=None,
-                    t_retrieval_ms=t_retrieval,
-                    t_total_ms=_ms(t0),
-                )
-                result = QueryResult(
-                    answer_md=REFUSAL_TEXT, refused=True, citations=[], usage=usage
-                )
-                await self._save(message_id, MessageStatus.DONE, result)
-                await self.trace.emit(
-                    "query.refused",
-                    "web",
-                    "browser",
-                    "Ничего не найдено → отказ",
-                    agent_id=agent.id,
-                )
-                yield DoneEvent(result=result)
+                yield DoneEvent(result=await self._refuse(agent, message_id, root, t0))
                 return
 
             citations = build_citations(chunks)
@@ -206,41 +221,17 @@ class QueryService:
                 temperature=gen.temperature,
                 max_tokens=gen.max_output_tokens,
             )
-            await self.trace.emit(
-                "query.sources",
-                "web",
-                "browser",
-                "SSE event: sources (карточки цитат)",
-                agent_id=agent.id,
-            )
-            await self.trace.emit(
-                "query.llm",
-                "web",
-                "llm",
-                f"Промпт {PROMPT_VERSION}: персона + {len(chunks)} чанков + вопрос → "
-                f"{self.llm.name}/{self.llm.model} (stream=true)",
-                agent_id=agent.id,
-            )
+            await self._trace_llm_call(agent.id, len(chunks))
+            generation = self._start_generation(root, request)
             llm_usage = LLMUsage()
             t_first: int | None = None
             async for chunk in self.llm.stream(request):
                 if chunk.delta:
                     if t_first is None:
                         t_first = _ms(t0)
-                        await self.trace.emit(
-                            "query.first_token",
-                            "llm",
-                            "web",
-                            f"Первый токен через {t_first} мс от вопроса",
-                            agent_id=agent.id,
-                        )
-                        await self.trace.emit(
-                            "query.tokens",
-                            "web",
-                            "browser",
-                            "SSE event: token … token (текст печатается на глазах)",
-                            agent_id=agent.id,
-                        )
+                        # Langfuse считает TTFT от старта generation до completion_start_time
+                        generation.update(completion_start_time=datetime.now(UTC))
+                        await self._trace_first_token(agent.id, t_first)
                     parts.append(chunk.delta)
                     yield TokenEvent(delta=chunk.delta)
                 if chunk.usage:
@@ -262,7 +253,8 @@ class QueryService:
                 citations=citations,
                 usage=usage,
             )
-            await self._save(message_id, MessageStatus.DONE, result)
+            await self._save(message_id, MessageStatus.DONE, result, root.trace_id)
+            self._end_generation(generation, root, result, llm_usage, t_first)
             await self._trace_done(agent.id, usage)
             log.info(
                 "query.done",
@@ -275,24 +267,169 @@ class QueryService:
             )
             yield DoneEvent(result=result)
         except (LLMError, TransientError, PermanentError) as e:
-            retryable = getattr(e, "retryable", isinstance(e, TransientError))
-            log.warning("query.failed", message_id=str(message_id), error=str(e))
-            await self.trace.emit(
-                "query.failed", "web", "browser", f"Ошибка: {type(e).__name__}", agent_id=agent.id
-            )
-            await self._save_partial(message_id, MessageStatus.ERROR, parts, citations)
-            yield ErrorEvent(
-                code="llm_error" if isinstance(e, LLMError) else "retrieval_error",
-                message="Не удалось получить ответ. Попробуйте ещё раз.",
-                retryable=retryable,
-            )
+            yield await self._fail(e, agent.id, message_id, parts, citations, root, generation)
         except (asyncio.CancelledError, GeneratorExit):
             # Клиент закрыл вкладку: сохраняем то, что успели, и отпускаем отмену дальше
             await asyncio.shield(
-                self._save_partial(message_id, MessageStatus.CANCELLED, parts, citations)
+                self._save_partial(
+                    message_id, MessageStatus.CANCELLED, parts, citations, root.trace_id
+                )
             )
-            log.info("query.cancelled", message_id=str(message_id))
+            self._end_cancelled(message_id, parts, root, generation)
             raise
+        finally:
+            # Непредвиденное исключение: закрываем то, что осталось открытым (end идемпотентен)
+            if generation is not None:
+                generation.end()
+            root.end()
+
+    async def _fail(
+        self,
+        e: LLMError | TransientError | PermanentError,
+        agent_id: UUID,
+        message_id: UUID,
+        parts: list[str],
+        citations: list[Citation],
+        root: Span,
+        generation: Span | None,
+    ) -> ErrorEvent:
+        log.warning("query.failed", message_id=str(message_id), error=str(e))
+        await self.trace.emit(
+            "query.failed", "web", "browser", f"Ошибка: {type(e).__name__}", agent_id=agent_id
+        )
+        await self._save_partial(message_id, MessageStatus.ERROR, parts, citations, root.trace_id)
+        status_message = f"{type(e).__name__}: {e}"[:500]
+        if generation is not None:
+            generation.end(level="ERROR", status_message=status_message)
+        root.end(level="ERROR", status_message=status_message)
+        return ErrorEvent(
+            code="llm_error" if isinstance(e, LLMError) else "retrieval_error",
+            message="Не удалось получить ответ. Попробуйте ещё раз.",
+            retryable=getattr(e, "retryable", isinstance(e, TransientError)),
+        )
+
+    @staticmethod
+    def _end_cancelled(
+        message_id: UUID, parts: list[str], root: Span, generation: Span | None
+    ) -> None:
+        if generation is not None:
+            generation.end(output="".join(parts), level="WARNING", status_message="cancelled")
+        root.end(level="WARNING", status_message="client_cancelled")
+        log.info("query.cancelled", message_id=str(message_id))
+
+    def _start_trace(
+        self, agent: AgentOut, owner_id: UUID, chat_id: UUID, message_id: UUID, question: str
+    ) -> Span:
+        """Трейс на вопрос: session = чат, user = владелец, tags = имя агента (§14.2)."""
+        return self.tracer.start_trace(
+            "query",
+            trace_id=self.tracer.trace_id_for(f"query:{message_id}"),
+            user_id=str(owner_id),
+            session_id=str(chat_id),
+            tags=[agent.name],
+            input=question,
+            metadata={
+                "agent_id": str(agent.id),
+                "message_id": str(message_id),
+                "prompt_version": PROMPT_VERSION,
+            },
+        )
+
+    def _start_generation(self, root: Span, request: LLMRequest) -> Span:
+        return root.child(
+            "llm_generate",
+            as_type="generation",
+            input=[m.model_dump(exclude_none=True) for m in request.messages],
+            model=self.llm.model,
+            model_parameters={
+                "temperature": request.temperature,
+                "max_tokens": request.max_tokens,
+                "reasoning_effort": self.llm.reasoning_effort,
+            },
+            metadata={"provider": self.llm.name, "prompt_version": PROMPT_VERSION},
+        )
+
+    def _end_generation(
+        self,
+        generation: Span,
+        root: Span,
+        result: QueryResult,
+        llm_usage: LLMUsage,
+        t_first: int | None,
+    ) -> None:
+        generation.end(
+            output=result.answer_md,
+            # Ключи совпадают с ценами model definition в Langfuse → он сам считает cost.
+            # reasoning уже входит в output_tokens (DeepSeek), поэтому — только в metadata.
+            usage_details={
+                "input": llm_usage.input_tokens - llm_usage.cached_input_tokens,
+                "input_cache_read": llm_usage.cached_input_tokens,
+                "output": llm_usage.output_tokens,
+            },
+            metadata={
+                "provider": self.llm.name,
+                "prompt_version": PROMPT_VERSION,
+                "reasoning_tokens": llm_usage.reasoning_tokens,
+                "ttft_ms": t_first,
+            },
+        )
+        root.end(
+            output=result.answer_md,
+            metadata={"refused": result.refused, "citations": len(result.citations)},
+        )
+
+    async def _refuse(
+        self, agent: AgentOut, message_id: UUID, root: Span, t0: float
+    ) -> QueryResult:
+        """Ничего не найдено: отказ без вызова LLM."""
+        t_total = _ms(t0)
+        usage = AnswerUsage(
+            provider="none",
+            model="none",
+            reasoning_effort=None,
+            t_retrieval_ms=t_total,
+            t_total_ms=t_total,
+        )
+        result = QueryResult(answer_md=REFUSAL_TEXT, refused=True, citations=[], usage=usage)
+        await self._save(message_id, MessageStatus.DONE, result, root.trace_id)
+        root.end(output=REFUSAL_TEXT, metadata={"refused": True, "reason": "no_chunks"})
+        await self.trace.emit(
+            "query.refused", "web", "browser", "Ничего не найдено → отказ", agent_id=agent.id
+        )
+        return result
+
+    async def _trace_llm_call(self, agent_id: UUID, n_chunks: int) -> None:
+        await self.trace.emit(
+            "query.sources",
+            "web",
+            "browser",
+            "SSE event: sources (карточки цитат)",
+            agent_id=agent_id,
+        )
+        await self.trace.emit(
+            "query.llm",
+            "web",
+            "llm",
+            f"Промпт {PROMPT_VERSION}: персона + {n_chunks} чанков + вопрос → "
+            f"{self.llm.name}/{self.llm.model} (stream=true)",
+            agent_id=agent_id,
+        )
+
+    async def _trace_first_token(self, agent_id: UUID, t_first: int) -> None:
+        await self.trace.emit(
+            "query.first_token",
+            "llm",
+            "web",
+            f"Первый токен через {t_first} мс от вопроса",
+            agent_id=agent_id,
+        )
+        await self.trace.emit(
+            "query.tokens",
+            "web",
+            "browser",
+            "SSE event: token … token (текст печатается на глазах)",
+            agent_id=agent_id,
+        )
 
     async def _trace_done(self, agent_id: UUID, usage: AnswerUsage) -> None:
         await self.trace.emit(
@@ -312,8 +449,8 @@ class QueryService:
             agent_id=agent_id,
         )
 
-    async def _retrieve(self, agent: AgentOut, question: str) -> list[RetrievedChunk]:
-        """Вопрос → вектор (Ollama) → top-k чанков агента (Qdrant)."""
+    async def _retrieve(self, agent: AgentOut, question: str, root: Span) -> list[RetrievedChunk]:
+        """Вопрос → вектор (Ollama) → top-k чанков агента (Qdrant). Каждый шаг — span трейса."""
         emit = self.trace.emit
         collection = await self._collection(agent)
         await emit(
@@ -324,7 +461,14 @@ class QueryService:
             agent_id=agent.id,
         )
         t = time.monotonic()
-        [vector] = await self.embedder.embed([normalize_for_index(question)])
+        with root.child(
+            "embed_query",
+            as_type="embedding",
+            input=question,
+            model=self.embedder.model,
+        ) as span:
+            [vector] = await self.embedder.embed([normalize_for_index(question)])
+            span.update(output={"dim": len(vector)})
         await emit(
             "query.embedded",
             "ollama",
@@ -342,7 +486,34 @@ class QueryService:
             agent_id=agent.id,
         )
         t = time.monotonic()
-        chunks = await self.index.search_dense(collection, agent.id, vector, top_k)
+        with root.child(
+            "qdrant_search",
+            as_type="retriever",
+            input={
+                "agent_id": str(agent.id),
+                "collection": collection,
+                "top_k": top_k,
+                "mode": "dense",
+            },
+        ) as span:
+            chunks = await self.index.search_dense(collection, agent.id, vector, top_k)
+            span.update(
+                output=[
+                    {
+                        "chunk_id": str(c.chunk_id),
+                        "document_id": str(c.document_id),
+                        "score": round(c.score, 4),
+                        "book_title": c.payload.book_title,
+                        "chapter": c.payload.chapter_title,
+                    }
+                    for c in chunks
+                ],
+                metadata={
+                    "agent_id": str(agent.id),
+                    "hits": len(chunks),
+                    "max_score": round(chunks[0].score, 4) if chunks else None,
+                },
+            )
         await emit(
             "query.found",
             "qdrant",
@@ -372,7 +543,9 @@ class QueryService:
             raise PermanentError("no_index", "У агента нет активного индекса")
         return index.collection
 
-    async def _save(self, message_id: UUID, status: MessageStatus, result: QueryResult) -> None:
+    async def _save(
+        self, message_id: UUID, status: MessageStatus, result: QueryResult, trace_id: str
+    ) -> None:
         async with self.db.uow() as uow:
             await ChatRepository(uow.session).finish_message(
                 message_id,
@@ -382,6 +555,7 @@ class QueryService:
                 refused=result.refused,
                 usage=result.usage.model_dump(mode="json") if result.usage else None,
                 prompt_version=PROMPT_VERSION,
+                trace_id=trace_id,
             )
             await uow.commit()
 
@@ -391,6 +565,7 @@ class QueryService:
         status: MessageStatus,
         parts: list[str],
         citations: list[Citation],
+        trace_id: str,
     ) -> None:
         async with self.db.uow() as uow:
             await ChatRepository(uow.session).finish_message(
@@ -399,5 +574,6 @@ class QueryService:
                 content="".join(parts),
                 citations=[c.model_dump(mode="json") for c in citations] or None,
                 prompt_version=PROMPT_VERSION,
+                trace_id=trace_id,
             )
             await uow.commit()

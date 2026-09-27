@@ -102,6 +102,7 @@ class ChatRepository:
         refused: bool | None = None,
         usage: dict[str, Any] | None = None,
         prompt_version: str | None = None,
+        trace_id: str | None = None,
     ) -> None:
         await self.s.execute(
             update(Message)
@@ -114,5 +115,29 @@ class ChatRepository:
                 # grounded (валидация [n]) появится в итерации 5 — до неё не заполняем
                 usage=usage,
                 prompt_version=prompt_version,
+                trace_id=trace_id,
             )
         )
+
+    async def set_feedback(
+        self, agent_id: UUID, user_id: UUID, message_id: UUID, value: int
+    ) -> MessageOut | None:
+        """Оценка только завершённого ответа ассистента в чате этого агента и пользователя."""
+        in_scope = (
+            select(Message.id)
+            .join(Chat, Chat.id == Message.chat_id)
+            .where(
+                Message.id == message_id,
+                Message.role == MessageRole.ASSISTANT,
+                Message.status == MessageStatus.DONE,
+                Chat.agent_id == agent_id,
+                Chat.user_id == user_id,
+            )
+        )
+        msg = await self.s.scalar(
+            update(Message)
+            .where(Message.id.in_(in_scope))
+            .values(feedback=value)
+            .returning(Message)
+        )
+        return MessageOut.model_validate(msg) if msg else None

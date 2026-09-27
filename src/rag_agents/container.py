@@ -3,6 +3,7 @@
 Web и воркеры получают готовые сервисы и не импортируют rag/llm/repositories напрямую.
 """
 
+import asyncio
 from dataclasses import dataclass, field
 from urllib.parse import unquote, urlsplit
 
@@ -12,6 +13,7 @@ from redis.asyncio import Redis
 
 from rag_agents.core.config import Settings
 from rag_agents.core.db import Database
+from rag_agents.core.observability import Tracer, build_tracer
 from rag_agents.core.storage import LocalFileStorage
 from rag_agents.llm.openai_compat import OpenAICompatProvider
 from rag_agents.rag.chunking.naive import NaiveChunker
@@ -42,6 +44,7 @@ class Container:
     query: QueryService
     trace: TraceBus
     system: SystemService
+    tracer: Tracer
     _ingest: IngestService | None = field(default=None)
 
     @property
@@ -51,6 +54,8 @@ class Container:
         return self._ingest
 
     async def aclose(self) -> None:
+        # Первым: дослать буфер трейсов, пока сеть и loop живы. SDK синхронный — в поток
+        await asyncio.to_thread(self.tracer.shutdown)
         await self.llm.aclose()
         await self.system.aclose()
         await self.rabbit_http.aclose()
@@ -98,6 +103,7 @@ def build_container(
         read_timeout_s=settings.llm_read_timeout_s,
     )
     trace = TraceBus(redis, enabled=settings.trace_enabled)
+    tracer = build_tracer(settings)
     broker = urlsplit(settings.celery_broker_url)
     rabbit_http = httpx.AsyncClient(
         base_url=settings.rabbitmq_management_url,
@@ -111,7 +117,9 @@ def build_container(
             target=settings.chunk_target_tokens,
             max_tokens=settings.chunk_max_tokens,
         )
-        ingest = IngestService(db, storage, chunker, embedder, index, progress, trace, settings)
+        ingest = IngestService(
+            db, storage, chunker, embedder, index, progress, trace, settings, tracer
+        )
     return Container(
         settings=settings,
         db=db,
@@ -122,8 +130,9 @@ def build_container(
         llm=llm,
         agents=AgentService(db, index, settings),
         documents=DocumentService(db, storage, progress, publisher, trace, settings),
-        query=QueryService(db, embedder, index, llm, trace, settings),
+        query=QueryService(db, embedder, index, llm, trace, settings, tracer),
         trace=trace,
         system=SystemService(db, redis, index, ollama_http, rabbit_http, inspect_active, settings),
+        tracer=tracer,
         _ingest=ingest,
     )

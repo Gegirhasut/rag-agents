@@ -41,6 +41,9 @@
             <div class="answer-body">{{ render_answer(m.content, anchor, (m.citations or [])|length)|safe }}</div>
             {% if m.status != 'done' %}<div class="small text-warning">Ответ прерван ({{ m.status }})</div>{% endif %}
             {{ usage_line(m.usage) }}
+            {% if m.status == 'done' %}
+              {% with message_id = m.id, agent_id = agent.id, feedback = m.feedback %}{% include "fragments/feedback.html" %}{% endwith %}
+            {% endif %}
           </div>
         {% endif %}
       {% endfor %}
