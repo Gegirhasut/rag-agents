@@ -48,6 +48,7 @@ migrations/  templates/  static/  tests/
 - Трейс ingest: `parse` → `chunk` → `save_chunks` → `embed_upsert` (батчи) → `finalize`, без текстов.
 - 👍/👎 под ответом → `messages.feedback` + score `user_feedback` (миграция `0002`).
 - No-op без ключей и в тестах; flush при остановке web и воркера. Проверка: `make langfuse-check`, `make langfuse-model`, `make langfuse-trace id=…`.
+- Страница «Аналитика» `/insights` (ARCHITECTURE §14.5): KPI, график, агенты, шаги пайплайна, последние трейсы с водопадом span-ов, сессии чатов и документов — данные Langfuse API у нас в UI. Демо-данные: `make demo-traffic`.
 
 **Долг перед итерацией 3:** когда ingest разойдётся на задачи parse и embed, трейс собирается по детерминированному `trace_id` от `document_id`.
 

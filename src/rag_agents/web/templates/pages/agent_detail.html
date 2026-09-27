@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "macros.html" import sources, usage_line %}
+{% from "macros.html" import sources, usage_line, trace_link %}
 {% block title %}{{ agent.name }} — RAG-агенты{% endblock %}
 {% block content %}
 <a href="/" class="small">← агенты</a>
@@ -27,7 +27,10 @@
   </section>
 
   <section class="col-lg-7">
-    <h2 class="h5">Вопрос агенту</h2>
+    <div class="d-flex justify-content-between align-items-baseline">
+      <h2 class="h5">Вопрос агенту</h2>
+      {% if insights_enabled and messages %}<a class="small" href="/insights/sessions/{{ messages[0].chat_id }}">📊 чат в аналитике</a>{% endif %}
+    </div>
     <div id="messages" class="messages mb-3">
       {% for m in messages %}
         {% if m.role == 'user' %}
@@ -41,9 +44,12 @@
             <div class="answer-body">{{ render_answer(m.content, anchor, (m.citations or [])|length)|safe }}</div>
             {% if m.status != 'done' %}<div class="small text-warning">Ответ прерван ({{ m.status }})</div>{% endif %}
             {{ usage_line(m.usage) }}
+            <div class="d-flex align-items-center gap-3">
             {% if m.status == 'done' %}
               {% with message_id = m.id, agent_id = agent.id, feedback = m.feedback %}{% include "fragments/feedback.html" %}{% endwith %}
             {% endif %}
+            {{ trace_link(m.trace_id) }}
+            </div>
           </div>
         {% endif %}
       {% endfor %}

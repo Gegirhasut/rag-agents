@@ -55,6 +55,7 @@ class QueryResult(BaseModel):
     refused: bool
     citations: list[Citation]
     usage: AnswerUsage | None
+    trace_id: str | None = None  # трейс в Langfuse (страница /insights/traces/{id})
 
 
 class QueryRequest(BaseModel):

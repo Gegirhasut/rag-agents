@@ -152,6 +152,7 @@ class QueryService:
                     refused=bool(msg.refused),
                     citations=citations,
                     usage=AnswerUsage.model_validate(msg.usage) if msg.usage else None,
+                    trace_id=msg.trace_id,
                 )
             )
         else:
@@ -252,6 +253,7 @@ class QueryService:
                 refused=answer.startswith(REFUSAL_TEXT[:40]),
                 citations=citations,
                 usage=usage,
+                trace_id=root.trace_id if self.tracer.enabled else None,
             )
             await self._save(message_id, MessageStatus.DONE, result, root.trace_id)
             self._end_generation(generation, root, result, llm_usage, t_first)
@@ -390,7 +392,13 @@ class QueryService:
             t_retrieval_ms=t_total,
             t_total_ms=t_total,
         )
-        result = QueryResult(answer_md=REFUSAL_TEXT, refused=True, citations=[], usage=usage)
+        result = QueryResult(
+            answer_md=REFUSAL_TEXT,
+            refused=True,
+            citations=[],
+            usage=usage,
+            trace_id=root.trace_id if self.tracer.enabled else None,
+        )
         await self._save(message_id, MessageStatus.DONE, result, root.trace_id)
         root.end(output=REFUSAL_TEXT, metadata={"refused": True, "reason": "no_chunks"})
         await self.trace.emit(

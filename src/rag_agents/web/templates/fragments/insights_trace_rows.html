@@ -1,0 +1,35 @@
+{% from "macros.html" import trace_kind, feedback_badge %}
+{% set rows = rows if rows is defined else o.recent %}
+<table class="table table-sm table-hover align-middle mb-0 traces">
+  <thead><tr>
+    <th>Время</th><th>Тип</th><th>Агент</th><th>Запрос</th>
+    <th class="text-end">Длительность</th><th class="text-end">1-й токен</th>
+    <th class="text-end">Токены</th><th class="text-end">Стоимость</th><th class="text-center">Оценка</th>
+  </tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr class="trace-row {{ 'table-danger' if r.level == 'ERROR' else '' }}" data-expand="tx-{{ r.trace_id }}"
+        hx-get="/insights/traces/{{ r.trace_id }}" hx-trigger="click once" hx-target="#txb-{{ r.trace_id }}"
+        role="button" aria-expanded="false">
+      <td class="text-nowrap small"><span class="chev">▸</span> <time datetime="{{ r.started_at.isoformat() }}" data-fmt="datetime"></time></td>
+      <td>{{ trace_kind(r.name) }}</td>
+      <td class="small text-truncate" style="max-width: 12rem">{{ r.agent or '—' }}</td>
+      <td class="text-truncate" style="max-width: 26rem" title="{{ r.title }}">
+        <a href="/insights/traces/{{ r.trace_id }}" class="link-body-emphasis text-decoration-none">{{ r.title }}</a>
+        {% if r.level == 'ERROR' %}<div class="small text-danger text-truncate">{{ r.status_message }}</div>{% endif %}
+      </td>
+      <td class="text-end text-nowrap">{{ r.latency_ms|ms }}</td>
+      <td class="text-end text-nowrap">{{ r.ttft_ms|ms }}</td>
+      <td class="text-end">{{ r.tokens|num }}</td>
+      <td class="text-end">{{ r.cost_usd|usd }}</td>
+      <td class="text-center">{{ feedback_badge(r.feedback) if r.name == 'query' else '' }}</td>
+    </tr>
+    <tr id="tx-{{ r.trace_id }}" class="trace-expand d-none"><td colspan="9">
+      <div id="txb-{{ r.trace_id }}"><div class="text-body-secondary small p-2">
+        <span class="spinner-border spinner-border-sm me-1"></span> Загружаю трейс…</div></div>
+    </td></tr>
+  {% else %}
+    <tr><td colspan="9" class="text-body-secondary small">Трейсов пока нет. Задайте агенту вопрос или загрузите документ.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>

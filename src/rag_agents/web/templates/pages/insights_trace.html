@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Трейс — Аналитика{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="/static/insights.css">
+<script src="/static/insights.js" defer></script>
+{% endblock %}
+{% block content %}
+<div class="insights">
+<nav class="small mb-2"><a href="/insights">📊 Аналитика</a> / трейс <code>{{ trace_id }}</code></nav>
+<h1 class="h4 mb-3 text-break">{{ t.title if t else 'Трейс' }}</h1>
+<div class="card"><div class="card-body">
+  {% include "fragments/insights_trace.html" %}
+</div></div>
+</div>
+{% endblock %}

@@ -275,10 +275,11 @@ class IngestService:
                 n_batch = start // batch + 1
                 t = time.monotonic()
                 with stage.child(
-                    f"embed_batch {n_batch}/{n_total}",
+                    # Имя стабильное (агрегаты Langfuse группируют по имени), номер — в metadata
+                    "embed_batch",
                     as_type="embedding",
                     model=self.settings.embedding_model,
-                    metadata={"batch": n_batch, "texts": len(part)},
+                    metadata={"batch": f"{n_batch}/{n_total}", "texts": len(part)},
                 ):
                     vectors = await self.embedder.embed([d.embed_text for d in part])
                 batch_embed_ms = int((time.monotonic() - t) * 1000)
@@ -313,7 +314,8 @@ class IngestService:
                 ]
                 t = time.monotonic()
                 with stage.child(
-                    f"upsert_batch {n_batch}/{n_total}", metadata={"points": len(points)}
+                    "upsert_batch",
+                    metadata={"batch": f"{n_batch}/{n_total}", "points": len(points)},
                 ):
                     await self.index.upsert(index.collection, agent.id, points)
                 upsert_ms += int((time.monotonic() - t) * 1000)

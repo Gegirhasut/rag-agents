@@ -1,6 +1,7 @@
 """Трейс вопроса и 👍/👎 → score: реальные PG и Qdrant; LLM, эмбеддер и tracer — фейки."""
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -196,3 +197,32 @@ async def test_feedback_on_foreign_message_is_not_found(
     with pytest.raises(NotFoundError):  # свой агент, но чужое сообщение
         await service.feedback(bob.owner_id, alice.id, pair.answer.id, 1)
     assert tracer.scores == {}
+
+
+async def test_feedback_stats_for_insights_are_scoped_to_owner(
+    db: Database,
+    qdrant: AsyncQdrantClient,
+    collection_prefix: str,
+    service: QueryService,
+) -> None:
+    """Оценки на странице «Аналитика» берутся из PG: только свои агенты и свои трейсы."""
+    alice = await _agent_with_chunk(db, qdrant, collection_prefix, f"ia-{uuid4().hex[:6]}@t")
+    bob = await _agent_with_chunk(db, qdrant, collection_prefix, f"ib-{uuid4().hex[:6]}@t")
+    since = datetime.now(UTC) - timedelta(minutes=5)
+    trace_ids = []
+    for value in (1, 1, -1):
+        pair = await service.ask(alice.owner_id, alice.id, None, "Вопрос?")
+        await _collect(await service.stream_answer(alice.owner_id, alice.id, pair.answer.id))
+        msg = await service.feedback(alice.owner_id, alice.id, pair.answer.id, value)  # type: ignore[arg-type]
+        assert msg.trace_id is not None
+        trace_ids.append(msg.trace_id)
+
+    async with db.session() as s:
+        repo = ChatRepository(s)
+        [stat] = await repo.feedback_stats(alice.owner_id, since)
+        assert (stat.agent_id, stat.up, stat.down) == (alice.id, 2, 1)
+        assert await repo.feedback_stats(bob.owner_id, since) == []
+        assert await repo.feedback_by_trace(alice.owner_id, trace_ids) == dict(
+            zip(trace_ids, [1, 1, -1], strict=True)
+        )
+        assert await repo.feedback_by_trace(bob.owner_id, trace_ids) == {}

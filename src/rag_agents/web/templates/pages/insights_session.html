@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Сессия — Аналитика{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="/static/insights.css">
+<script src="/static/insights.js" defer></script>
+{% endblock %}
+{% block content %}
+<div class="insights">
+<nav class="small mb-2"><a href="/insights">📊 Аналитика</a> / сессия</nav>
+<div class="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-3">
+  <div>
+    <h1 class="h4 mb-1">{{ 'Индексация документа' if session_id.startswith('document-') else 'Чат' }}</h1>
+    <div class="small text-body-secondary">session <code>{{ session_id }}</code> · {{ rows|length }} трейсов
+      {% if rows %} · {{ rows|map(attribute='cost_usd')|map('default', 0, true)|sum|usd }}{% endif %}</div>
+  </div>
+  {% if project_url %}<a class="btn btn-sm btn-outline-secondary" href="{{ project_url }}/sessions/{{ session_id }}" target="_blank" rel="noopener">Langfuse ↗</a>{% endif %}
+</div>
+{% if error %}{% with error = error %}{% include "fragments/insights_unavailable.html" %}{% endwith %}{% endif %}
+<div class="card"><div class="table-responsive">
+  {% include "fragments/insights_trace_rows.html" %}
+</div></div>
+</div>
+{% endblock %}

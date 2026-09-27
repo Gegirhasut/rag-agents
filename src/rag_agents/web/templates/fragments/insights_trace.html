@@ -1,0 +1,94 @@
+{% from "macros.html" import trace_kind, feedback_badge %}
+{% if t is none and give_up %}
+<div class="small text-body-secondary p-2">Трейс не найден в Langfuse. Возможно, он ещё не дошёл
+  (сеть, фоновый экспорт) или трейсинг был выключен, когда шёл этот запрос.</div>
+{% elif t is none %}
+{# Langfuse обрабатывает трейсы асинхронно: свежий ответ появляется в API через несколько секунд #}
+<div class="small text-body-secondary p-2" hx-get="/insights/traces/{{ trace_id }}?attempt={{ (attempt or 0) + 1 }}"
+     hx-trigger="load delay:3s" hx-swap="outerHTML">
+  <span class="spinner-border spinner-border-sm me-1"></span> Langfuse ещё обрабатывает трейс, обновлю через пару секунд…
+</div>
+{% else %}
+<div class="trace-detail">
+  <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+    {{ trace_kind(t.name) }}
+    {% if t.agent %}<span class="small fw-semibold">{{ t.agent }}</span>{% endif %}
+    <span class="small text-body-secondary"><time datetime="{{ t.started_at.isoformat() }}" data-fmt="datetime"></time></span>
+    <span class="small">⏱ {{ t.duration_ms|ms }}</span>
+    {% if t.cost_usd %}<span class="small">💵 {{ t.cost_usd|usd }}</span>{% endif %}
+    {% if t.name == 'query' %}<span class="small">{{ feedback_badge(t.feedback) }}</span>{% endif %}
+    {% if t.level == 'ERROR' %}<span class="badge text-bg-danger">ошибка</span>{% endif %}
+    <span class="ms-auto d-flex gap-2">
+      {% if t.session_id %}<a class="small" href="/insights/sessions/{{ t.session_id }}">вся сессия →</a>{% endif %}
+      <a class="small" href="/insights/traces/{{ t.trace_id }}">отдельной страницей</a>
+      {% if t.langfuse_url %}<a class="small" href="{{ t.langfuse_url }}" target="_blank" rel="noopener">Langfuse ↗</a>{% endif %}
+    </span>
+  </div>
+  {% if t.status_message %}<div class="alert alert-danger py-1 px-2 small mb-2">{{ t.status_message }}</div>{% endif %}
+
+  <div class="waterfall">
+    <div class="wf-scale"><span>0</span><span>{{ (t.duration_ms / 2)|ms }}</span><span>{{ t.duration_ms|ms }}</span></div>
+    {% set total = t.duration_ms or 1 %}
+    {% for s in t.spans %}
+    <details class="wf-row {{ 'wf-error' if s.is_error else '' }}">
+      <summary>
+        <span class="wf-name" style="padding-left: {{ s.depth * 1.1 }}rem">
+          <span class="wf-type t-{{ s.type|lower }}">{{ s.type|lower }}</span> {{ s.name }}
+        </span>
+        <span class="wf-track">
+          <span class="wf-bar t-{{ s.type|lower }}"
+                style="left: {{ (s.offset_ms / total * 100)|round(2) }}%; width: max(3px, {{ (s.duration_ms / total * 100)|round(2) }}%)">
+            {% if s.ttft_ms and s.duration_ms %}
+            <span class="wf-wait" style="width: {{ [s.ttft_ms / s.duration_ms * 100, 100]|min|round(1) }}%" title="ожидание первого токена {{ s.ttft_ms|ms }}"></span>
+            {% endif %}
+          </span>
+        </span>
+        <span class="wf-dur">{{ s.duration_ms|ms }}</span>
+      </summary>
+      <div class="wf-details">
+        {% if s.status_message %}<div class="text-danger mb-1">{{ s.status_message }}</div>{% endif %}
+        {% if s.model %}<div><span class="k">модель</span> <code>{{ s.model }}</code></div>{% endif %}
+        {% if s.ttft_ms %}<div><span class="k">первый токен</span> {{ s.ttft_ms|ms }}</div>{% endif %}
+        {% if s.usage %}<div><span class="k">токены</span>
+          {% for key, val in s.usage.items() if key != 'total' %}{{ key }} {{ val|num }}{{ ' · ' if not loop.last else '' }}{% endfor %}
+          {% if s.cost_usd %} · <strong>{{ s.cost_usd|usd }}</strong>{% endif %}</div>{% endif %}
+        {% for key, val in s.details.items() %}<div><span class="k">{{ key }}</span> {{ val }}</div>{% endfor %}
+        {% if s.hits %}
+        <table class="table table-sm mb-0 mt-1 hits">
+          <thead><tr><th class="text-end">score</th><th>источник</th><th>chunk</th></tr></thead>
+          <tbody>{% for h in s.hits %}
+            <tr><td class="text-end"><span class="score" style="--s: {{ h.score }}">{{ '%.3f'|format(h.score) }}</span></td>
+              <td>{{ h.label }}</td><td><code class="small">{{ h.chunk_id[:8] }}</code></td></tr>
+          {% endfor %}</tbody>
+        </table>
+        {% endif %}
+        {% if not (s.model or s.usage or s.details or s.hits or s.status_message) %}<span class="text-body-secondary">деталей нет</span>{% endif %}
+      </div>
+    </details>
+    {% endfor %}
+  </div>
+
+  {% if t.name == 'query' %}
+  <div class="row g-2 mt-2">
+    <div class="col-md-6">
+      <div class="qa"><div class="k mb-1">Вопрос</div>{{ t.title }}</div>
+    </div>
+    <div class="col-md-6">
+      <details class="qa" {% if (t.answer or '')|length < 400 %}open{% endif %}>
+        <summary class="k">Ответ ({{ (t.answer or '')|length }} симв.)</summary>
+        <div class="answer-text">{{ t.answer or '—' }}</div>
+      </details>
+    </div>
+  </div>
+  {% if t.prompt %}
+  <details class="qa mt-2">
+    <summary class="k">Промпт LLM: {{ t.prompt|length }} сообщения, {{ t.prompt|map(attribute='content')|map('length')|sum|num }} символов</summary>
+    {% for m in t.prompt %}
+    <div class="prompt-msg"><span class="badge text-bg-light border">{{ m.role }}</span>
+      <div class="answer-text">{{ m.content }}</div></div>
+    {% endfor %}
+  </details>
+  {% endif %}
+  {% endif %}
+</div>
+{% endif %}

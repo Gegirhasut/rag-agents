@@ -1,11 +1,12 @@
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_agents.core.ids import uuid7
-from rag_agents.domain.chats import ChatOut, MessageOut
+from rag_agents.domain.chats import ChatOut, FeedbackStat, MessageOut
 from rag_agents.domain.enums import MessageRole, MessageStatus
 from rag_agents.models.entities import Chat, Message
 
@@ -141,3 +142,36 @@ class ChatRepository:
             .returning(Message)
         )
         return MessageOut.model_validate(msg) if msg else None
+
+    async def feedback_stats(self, user_id: UUID, since: datetime) -> list[FeedbackStat]:
+        """👍/👎 по агентам пользователя за период (по времени ответа)."""
+        rows = await self.s.execute(
+            select(
+                Chat.agent_id,
+                func.count().filter(Message.feedback == 1),
+                func.count().filter(Message.feedback == -1),
+            )
+            .join(Chat, Chat.id == Message.chat_id)
+            .where(
+                Chat.user_id == user_id,
+                Message.feedback.is_not(None),
+                Message.created_at >= since,
+            )
+            .group_by(Chat.agent_id)
+        )
+        return [FeedbackStat(agent_id=a, up=up, down=down) for a, up, down in rows.all()]
+
+    async def feedback_by_trace(self, user_id: UUID, trace_ids: list[str]) -> dict[str, int]:
+        """trace_id → оценка (1 / -1) для ответов этого пользователя."""
+        if not trace_ids:
+            return {}
+        rows = await self.s.execute(
+            select(Message.trace_id, Message.feedback)
+            .join(Chat, Chat.id == Message.chat_id)
+            .where(
+                Chat.user_id == user_id,
+                Message.trace_id.in_(trace_ids),
+                Message.feedback.is_not(None),
+            )
+        )
+        return {str(t): int(f) for t, f in rows.all()}

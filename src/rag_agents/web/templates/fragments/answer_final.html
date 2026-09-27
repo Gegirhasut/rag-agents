@@ -1,4 +1,4 @@
-{% from "macros.html" import usage_line %}<div class="answer-body">{{ answer_html|safe }}</div>
+{% from "macros.html" import usage_line, trace_link %}<div class="answer-body">{{ answer_html|safe }}</div>
 {% if result.refused %}<div class="small text-secondary">Ответ не найден в материалах агента.</div>{% endif %}
 {{ usage_line(result.usage) }}
-{% include "fragments/feedback.html" %}
+<div class="d-flex align-items-center gap-3">{% include "fragments/feedback.html" %}{{ trace_link(result.trace_id) }}</div>

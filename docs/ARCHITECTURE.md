@@ -629,6 +629,10 @@ class LLMProvider(Protocol):
 | GET | `/agents/{id}/chats/{cid}` | страница чата | `cid=new` создаёт чат |
 | POST | `/agents/{id}/chats/{cid}/messages` | фрагмент: вопрос + пустой пузырь ответа с `sse-connect` | |
 | GET | `/agents/{id}/messages/{mid}/stream` | `text/event-stream` | см. §6.3 |
+| GET | `/insights?period=24h\|7d\|30d` | страница «Аналитика» (§14.5) | обзор догружается фрагментом |
+| GET | `/insights/overview?period=…` | фрагмент: KPI, график, шаги, агенты, трейсы | HTMX, обновление раз в минуту |
+| GET | `/insights/traces/{trace_id}` | страница или фрагмент (HTMX) водопада span-ов | чужой трейс → 404 |
+| GET | `/insights/sessions/{session_id}` | трейсы чата (`chat_id`) или документа (`document-{id}`) | |
 | POST | `/agents/{id}/messages/{mid}/feedback` | фрагмент кнопок 👍/👎 с выбранной | `value=1\|-1`; только завершённый ответ; score в Langfuse (§14.2) |
 | GET | `/agents/{id}/chunks/{chunk_id}` | фрагмент-поповер источника | для `[n]` |
 | GET | `/admin/dlq`, POST `/admin/dlq/{queue}/replay` | страница / 303 | только админ |
@@ -1286,6 +1290,22 @@ Healthchecks у всех хранилищ. `depends_on: condition: service_healt
 **Проверка:** `make langfuse-check` (auth + тестовый трейс, ждём его в API), `make langfuse-model` (цена `LLM_MODEL`, идемпотентно), `make langfuse-trace id=<trace_id>` (дерево, токены, cost, score-ы).
 
 **Дальше (итерация 4):** rerank и build_context как отдельные span-ы, eval-прогоны в Langfuse Datasets (дублируя PG) для сравнения экспериментов в UI.
+
+### 14.5 Страница «Аналитика» (`/insights`) — Langfuse у нас в UI
+Цель: не ходить в UI Langfuse ради ежедневных вопросов «сколько стоит, как быстро, где тормозит, что ругают». Langfuse — хранилище и глубокий разбор; у нас — сводка и трейс в один клик.
+- **Чтение:** `core/langfuse_api.py::LangfuseReader` (async httpx, Basic auth ключами проекта): `GET /api/public/v2/metrics`, `GET /api/public/v2/observations`, `GET /api/public/projects`. Legacy `GET /traces` не используется (410, ADR-9).
+- **`services/insights.py::InsightsService`:**
+  - `overview(owner, period)` — 9 запросов Metrics API v2 параллельно (семафор 4), кэш в Redis 60 с. KPI (вопросы, стоимость и цена ответа, p50/p95 ответа и TTFT, токены, индексации и ошибки), ряд по часам/дням, агенты (группировка по `tags` = имя агента), «где тратится время» (p50/p95 по имени span-а), модели, последние 30 трейсов;
+  - `trace(owner, trace_id)` — водопад span-ов (смещение и длительность от старта корня, TTFT внутри generation), найденные чанки со score, usage и cost, промпт, вопрос и ответ; кэш 10 мин для завершённых трейсов. Свежий трейс, ещё не обработанный Langfuse, → фрагмент с автоповтором (≤ 10 раз по 3 с);
+  - `session(owner, session_id)` — все трейсы чата или документа.
+- **Изоляция:** каждый запрос к Langfuse фильтруется `userId = owner`; трейс чужого владельца → 404 (и при чтении из кэша). Проект Langfuse общий, поэтому это не формальность, а тот же инвариант, что у PG и Qdrant.
+- **Оценки 👍/👎 — из PG** (`messages.feedback`, `ChatRepository.feedback_stats/feedback_by_trace`), а не из Langfuse: score-ы в Metrics API не несут `userId` и теги трейса, а PG и так источник правды.
+- **Наружу — только выбранные поля:** в metadata наблюдений SDK кладёт служебные ключи (`scope.*`, `resourceAttributes.*`, public key); страница показывает только белый список (`_DETAIL_KEYS`).
+- **Ссылки:** под каждым ответом «🔎 трейс», у документа — «🔎 трейс» (сессия `document-{id}`), у чата — «📊 чат в аналитике», в трейсе — «Langfuse ↗».
+- **Графики:** Chart.js 4 с jsDelivr (без node-сборки), остальное — Bootstrap и CSS-переменные (работает в тёмной теме).
+- Имена span-ов стабильные (`embed_batch`, `upsert_batch`; номер батча — в metadata), иначе агрегаты по имени рассыпаются.
+- Без ключей Langfuse страница показывает подсказку по настройке, ссылки «трейс» скрыты.
+- **Демо-данные:** `make demo-traffic ROUNDS=2` — два демо-агента, книга + пустой файл (ошибка ingest), вопросы по корпусу, вне корпуса и prompt injection с оценками.
 
 ### 14.3 Метрики — Prometheus-формат (`prometheus_client`)
 - `http_requests_total{route,method,status}`, `http_request_seconds` (histogram).

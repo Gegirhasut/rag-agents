@@ -36,3 +36,11 @@ class MessageOut(BaseModel):
 class MessagePair(BaseModel):
     question: MessageOut
     answer: MessageOut
+
+
+class FeedbackStat(BaseModel):
+    """Оценки ответов агента за период (👍 = up, 👎 = down)."""
+
+    agent_id: UUID
+    up: int
+    down: int

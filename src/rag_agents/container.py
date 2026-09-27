@@ -13,6 +13,7 @@ from redis.asyncio import Redis
 
 from rag_agents.core.config import Settings
 from rag_agents.core.db import Database
+from rag_agents.core.langfuse_api import LangfuseReader
 from rag_agents.core.observability import Tracer, build_tracer
 from rag_agents.core.storage import LocalFileStorage
 from rag_agents.llm.openai_compat import OpenAICompatProvider
@@ -23,6 +24,7 @@ from rag_agents.rag.index.qdrant import QdrantChunkIndex
 from rag_agents.services.agents import AgentService
 from rag_agents.services.documents import DocumentService, TaskPublisher
 from rag_agents.services.ingest import IngestService
+from rag_agents.services.insights import InsightsService
 from rag_agents.services.progress import ProgressStore
 from rag_agents.services.query import QueryService
 from rag_agents.services.system import SystemService
@@ -45,6 +47,7 @@ class Container:
     trace: TraceBus
     system: SystemService
     tracer: Tracer
+    insights: InsightsService
     _ingest: IngestService | None = field(default=None)
 
     @property
@@ -56,6 +59,7 @@ class Container:
     async def aclose(self) -> None:
         # Первым: дослать буфер трейсов, пока сеть и loop живы. SDK синхронный — в поток
         await asyncio.to_thread(self.tracer.shutdown)
+        await self.insights.reader.aclose()
         await self.llm.aclose()
         await self.system.aclose()
         await self.rabbit_http.aclose()
@@ -134,5 +138,6 @@ def build_container(
         trace=trace,
         system=SystemService(db, redis, index, ollama_http, rabbit_http, inspect_active, settings),
         tracer=tracer,
+        insights=InsightsService(LangfuseReader(settings), redis, db),
         _ingest=ingest,
     )

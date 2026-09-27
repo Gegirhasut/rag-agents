@@ -11,10 +11,10 @@
       <td class="doc-status" data-status="{{ d.status.value }}">
         {% if d.status.value == 'done' %}
           <span class="badge text-bg-success">done</span>
-          <div class="small text-secondary">{{ d.chunks_total }} чанков{% if d.duration_s %} · {{ '%.0f'|format(d.duration_s) }} с{% endif %}</div>
+          <div class="small text-secondary">{{ d.chunks_total }} чанков{% if d.duration_s %} · {{ '%.0f'|format(d.duration_s) }} с{% endif %}{% if insights_enabled %} · <a href="/insights/sessions/document-{{ d.id }}" class="text-decoration-none">🔎 трейс</a>{% endif %}</div>
         {% elif d.status.value == 'failed' %}
           <span class="badge text-bg-danger">failed</span>
-          <div class="small text-danger">{{ d.error_message }}</div>
+          <div class="small text-danger">{{ d.error_message }}{% if insights_enabled %} · <a href="/insights/sessions/document-{{ d.id }}" class="text-decoration-none">🔎 трейс</a>{% endif %}</div>
         {% elif d.status.value == 'processing' %}
           <span class="badge text-bg-primary">processing</span> <span class="small">{{ d.stage }}</span>
           <div class="progress mt-1" role="progressbar" aria-valuenow="{{ d.progress }}" style="height: 6px">

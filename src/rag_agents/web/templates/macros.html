@@ -33,3 +33,17 @@
 </div>
 {% endif %}
 {%- endmacro %}
+
+{% macro trace_link(trace_id) -%}
+{% if trace_id and insights_enabled %}<a class="small trace-link text-decoration-none" href="/insights/traces/{{ trace_id }}" title="Шаги, тайминги, промпт и стоимость этого ответа">🔎 трейс</a>{% endif %}
+{%- endmacro %}
+
+{% macro trace_kind(name) -%}
+{% if name == 'query' %}<span class="badge kind kind-query">вопрос</span>
+{% elif name == 'ingest' %}<span class="badge kind kind-ingest">индексация</span>
+{% else %}<span class="badge kind">{{ name }}</span>{% endif %}
+{%- endmacro %}
+
+{% macro feedback_badge(v) -%}
+{% if v is none %}<span class="text-body-secondary">·</span>{% elif v %}<span title="👍 полезный ответ">👍</span>{% else %}<span title="👎 плохой ответ">👎</span>{% endif %}
+{%- endmacro %}
