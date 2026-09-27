@@ -1,0 +1,35 @@
+{% macro source_label(c) -%}
+{%- if c.author %}{{ c.author }}{% endif -%}
+{%- if c.author and c.book_title %} — {% endif -%}
+{%- if c.book_title %}«{{ c.book_title }}»{% endif -%}
+{%- if not c.author and not c.book_title %}Источник{% endif -%}
+{%- if c.chapter_title %}, гл. {{ c.chapter_title }}{% endif -%}
+{%- endmacro %}
+
+{% macro sources(citations, anchor) -%}
+{% if citations %}
+<details class="sources mb-2">
+  <summary class="small text-secondary">Источники ({{ citations|length }})</summary>
+  <ol class="list-unstyled mt-2 mb-0">
+  {% for c in citations %}
+    <li class="source-card" id="{{ anchor }}-{{ c.n }}">
+      <div class="small fw-semibold">[{{ c.n }}] {{ source_label(c) }}
+        <span class="text-secondary fw-normal">· score {{ '%.3f'|format(c.score) }}</span></div>
+      <div class="small text-body-secondary source-snippet">{{ c.snippet }}</div>
+    </li>
+  {% endfor %}
+  </ol>
+</details>
+{% endif %}
+{%- endmacro %}
+
+{% macro usage_line(u) -%}
+{% if u %}
+<div class="usage small text-secondary mt-2">
+  {% if u.model != 'none' %}{{ u.provider }}/{{ u.model }}{% if u.reasoning_effort %} · effort={{ u.reasoning_effort }}{% endif %}
+  · поиск {{ u.t_retrieval_ms }} мс{% if u.t_first_token_ms %} · первый токен {{ u.t_first_token_ms }} мс{% endif %}
+  · всего {{ u.t_total_ms }} мс · токены {{ u.input_tokens }}→{{ u.output_tokens }}{% if u.reasoning_tokens %} (reasoning {{ u.reasoning_tokens }}){% endif %}{% if u.cached_input_tokens %} · cache {{ u.cached_input_tokens }}{% endif %}
+  {% else %}поиск {{ u.t_retrieval_ms }} мс · ответ без вызова LLM{% endif %}
+</div>
+{% endif %}
+{%- endmacro %}

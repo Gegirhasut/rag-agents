@@ -1,0 +1,3 @@
+{% for e in errors or [] %}<div class="alert alert-danger py-2 small">{{ e }}</div>{% endfor %}
+{% for n in notes or [] %}<div class="alert alert-info py-2 small">{{ n }}</div>{% endfor %}
+{% include "fragments/documents_table.html" %}

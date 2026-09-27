@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% from "macros.html" import sources, usage_line %}
+{% block title %}{{ agent.name }} — RAG-агенты{% endblock %}
+{% block content %}
+<a href="/" class="small">← агенты</a>
+<div class="d-flex flex-wrap align-items-baseline gap-3 mt-1">
+  <h1 class="h3 mb-2">{{ agent.name }}</h1>
+  <a class="small" href="/system?agent={{ agent.id }}" target="_blank">🔬 смотреть под капотом (откроется рядом)</a>
+</div>
+{% if agent.description %}<p class="text-body-secondary">{{ agent.description }}</p>{% endif %}
+
+<div class="row g-4">
+  <section class="col-lg-5">
+    <h2 class="h5">Документы</h2>
+    <form hx-post="/agents/{{ agent.id }}/documents" hx-encoding="multipart/form-data"
+          hx-target="#docs-panel" hx-swap="innerHTML" hx-disabled-elt="find button"
+          hx-on::after-request="if(event.detail.successful) this.reset()" class="mb-3">
+      <div class="input-group">
+        <input class="form-control" type="file" name="files" accept=".txt" multiple required>
+        <button class="btn btn-outline-primary" type="submit">Загрузить</button>
+      </div>
+      <div class="form-text">Итерация 1: только .txt (UTF-8, cp1251, koi8-r), до 100 МБ.</div>
+    </form>
+    <div id="docs-panel">
+      {% include "fragments/documents_panel.html" %}
+    </div>
+  </section>
+
+  <section class="col-lg-7">
+    <h2 class="h5">Вопрос агенту</h2>
+    <div id="messages" class="messages mb-3">
+      {% for m in messages %}
+        {% if m.role == 'user' %}
+          {% with q = m %}{% include "fragments/question.html" %}{% endwith %}
+        {% elif m.status == 'pending' %}
+          {% with a = m, agent_id = agent.id %}{% include "fragments/answer_stream.html" %}{% endwith %}
+        {% else %}
+          {% set anchor = 'src-' ~ m.id %}
+          <div class="answer card card-body mb-3">
+            {{ sources(m.citations, anchor) }}
+            <div class="answer-body">{{ render_answer(m.content, anchor, (m.citations or [])|length)|safe }}</div>
+            {% if m.status != 'done' %}<div class="small text-warning">Ответ прерван ({{ m.status }})</div>{% endif %}
+            {{ usage_line(m.usage) }}
+          </div>
+        {% endif %}
+      {% endfor %}
+    </div>
+    <form hx-post="/agents/{{ agent.id }}/chats/new/messages" hx-target="#messages" hx-swap="beforeend"
+          hx-on::after-request="if(event.detail.successful) this.reset()">
+      <div class="input-group">
+        <input class="form-control" name="question" required minlength="2" maxlength="2000"
+               placeholder="В чём смысл жизни?" autocomplete="off">
+        <button class="btn btn-primary" type="submit">Спросить</button>
+      </div>
+    </form>
+  </section>
+</div>
+{% endblock %}

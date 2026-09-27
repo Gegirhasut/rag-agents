@@ -89,7 +89,7 @@ rag-agents/
 ## Команды (целевые, `Makefile`)
 ```bash
 make up            # docker compose up -d (профиль по умолчанию)
-make up-debug      # + flower
+make up-debug      # + flower, pgweb, redisinsight (ссылки на /system)
 make down          # docker compose down
 make logs s=web    # логи сервиса
 make migrate       # alembic upgrade head (в контейнере migrate)
@@ -112,7 +112,7 @@ make dlq-replay QUEUE=ingest.embed
 ## Окружение (VM)
 - Ubuntu 22.04, 6 vCPU, 7.8 GiB RAM + 2 GiB swap, без GPU. Docker 29 + Compose v5. Логи json-file 10m × 3.
 - UI с Windows-хоста: `http://192.168.56.10:8080`. Остальные порты — только `127.0.0.1` (Docker обходит ufw). Таблица портов и лимитов памяти — в ARCHITECTURE §13. **Суммарный бюджет ~6.6 GiB, новые сервисы только с пересчётом.**
-- Ollama для LLM (если нужен локальный) — на Windows-хосте `192.168.56.1:11434`. На VM память есть только под bge-m3.
+- Ollama для LLM (если нужен локальный) — на Windows-хосте, из VM — `http://10.0.2.2:11434` (VirtualBox NAT, `--nat-localhostreachable1`). На VM память есть только под bge-m3.
 - На VM лежит код проекта ботов (`~/code/bots.ai`) — не трогать.
 
 ## Git

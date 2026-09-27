@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+{% block title %}Под капотом — RAG-агенты{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/system.css">{% endblock %}
+{% block content %}
+<div class="sys">
+<div class="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-3">
+  <div>
+    <h1 class="h3 mb-1">🔬 Под капотом</h1>
+    <p class="text-body-secondary mb-0">Как устроен проект: живая схема сервисов, векторы в Qdrant,
+      очереди Celery и всё остальное. Задайте вопрос или загрузите книгу, и схема покажет,
+      что происходит.</p>
+  </div>
+  <a class="small" href="#glossary">Справочник технологий ↓</a>
+</div>
+
+{# Админки: заполняется OOB-свапом из fragments/system_stats.html #}
+<div id="admin-uis" class="mb-4"></div>
+
+<div class="row g-3">
+  <section class="col-12">
+    <div class="card">
+      <div class="card-header d-flex align-items-center gap-2">
+        <strong>Живая схема</strong>
+        <span id="live-dot" class="live-dot" title="SSE-подписка на trace:events"></span>
+        <span id="live-caption" class="small text-body-secondary text-truncate">ожидаю событий…</span>
+      </div>
+      <div class="card-body p-2">
+        <svg id="arch" viewBox="0 0 1082 490" role="img" aria-label="Схема сервисов проекта">
+          <defs>
+            <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+              <feGaussianBlur stdDeviation="5" result="b"/>
+              <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+          </defs>
+          <g id="edges"></g>
+          <g id="nodes">
+          {% for n in nodes %}
+            <g class="node g-{{ n.group }}" data-node="{{ n.id }}" transform="translate({{ n.x }},{{ n.y }})"
+               tabindex="0" role="button" aria-label="{{ n.title }}">
+              <rect class="node-box" width="{{ node_w }}" height="{{ node_h }}" rx="10"/>
+              <rect class="node-stripe" width="6" height="{{ node_h }}" rx="3"/>
+              <text class="node-title" x="16" y="24">{{ n.title }}</text>
+              <text class="node-sub" x="16" y="43">{{ n.subtitle }}</text>
+              <text class="node-badge" x="16" y="64" data-badge="{{ n.id }}">…</text>
+            </g>
+          {% endfor %}
+          </g>
+          <g id="dots"></g>
+        </svg>
+        <div class="legend small text-body-secondary px-2">
+          <span><i class="sw g-client"></i>клиент</span>
+          <span><i class="sw g-app"></i>наш Python-код</span>
+          <span><i class="sw g-store"></i>хранилища</span>
+          <span><i class="sw g-queue"></i>очередь</span>
+          <span><i class="sw g-ai"></i>AI-сервисы</span>
+          <span class="ms-auto">клик по блоку — описание технологии</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="col-lg-7">
+    <div class="card h-100">
+      <div class="card-header"><strong>Спросить агента отсюда</strong>
+        <span class="small text-body-secondary">— ответ будет здесь, а схема и карта векторов оживут</span></div>
+      <div class="card-body">
+        {% if agents %}
+        <form id="sys-ask" hx-post="/agents/{{ selected.agent.id }}/chats/new/messages" hx-target="#sys-chat"
+              hx-swap="innerHTML" hx-on::after-request="if(event.detail.successful) this.reset()">
+          <div class="input-group">
+            <input class="form-control" name="question" required minlength="2" maxlength="2000"
+                   placeholder="Вопрос агенту «{{ selected.agent.name }}»" autocomplete="off">
+            <button class="btn btn-primary" type="submit">Спросить</button>
+          </div>
+        </form>
+        <div id="sys-chat" class="mt-3"></div>
+        {% else %}
+        <p class="mb-0">Агентов пока нет. <a href="/agents/new">Создайте агента</a> и загрузите книгу.</p>
+        {% endif %}
+      </div>
+    </div>
+  </section>
+
+  <aside class="col-lg-5">
+    <div class="card h-100">
+      <div class="card-header d-flex justify-content-between">
+        <strong>Журнал событий</strong>
+        <span class="small text-body-secondary">Redis pub/sub → SSE</span>
+      </div>
+      <ol id="event-log" class="event-log list-unstyled mb-0"></ol>
+    </div>
+  </aside>
+</div>
+
+{# Описание выбранного узла #}
+<div id="node-info" class="card mt-3 d-none"></div>
+
+<section class="card mt-4" id="vectors">
+  <div class="card-header d-flex flex-wrap align-items-center gap-2">
+    <strong>Карта векторов Qdrant</strong>
+    {% if agents %}
+    <span class="small text-body-secondary">агент</span>
+    <select id="map-agent" class="form-select form-select-sm w-auto" aria-label="Агент">
+      {% for a in agents %}<option value="{{ a.agent.id }}" data-name="{{ a.agent.name }}"{% if a.agent.id == selected.agent.id %} selected{% endif %}>{{ a.agent.name }}</option>{% endfor %}
+    </select>
+    <a id="map-agent-link" class="small" href="/agents/{{ selected.agent.id }}">страница агента →</a>
+    {% endif %}
+    <span id="map-meta" class="small text-body-secondary ms-auto"></span>
+  </div>
+  <div class="card-body">
+    <div class="row g-3">
+      <div class="col-lg-8">
+        <div class="map-wrap">
+          <canvas id="map" height="460" aria-label="2D-проекция векторов чанков"></canvas>
+          <div id="map-tip" class="map-tip d-none"></div>
+        </div>
+        <div id="map-legend" class="legend small mt-2"></div>
+      </div>
+      <div class="col-lg-4 small">
+        <p><b>Что на картинке.</b> Каждая точка — чанк (кусок книги ~400 токенов). В Qdrant у неё
+          вектор из <b>1024 чисел</b>: его посчитала модель bge-m3. Вектор нельзя нарисовать,
+          поэтому метод главных компонент (PCA) проецирует 1024 измерения на 2 оси,
+          вдоль которых точки различаются сильнее всего. Близкие точки близки по смыслу,
+          но проекция теряет много информации, так что соседство на плоскости приблизительное.</p>
+        <p><b>Во время вопроса</b> на карте появится ★ — вектор вашего вопроса в той же проекции,
+          а найденные Qdrant чанки подсветятся кольцами с score (косинусная близость в полных
+          1024 измерениях, а не расстояние на картинке).</p>
+        <p class="mb-2"><b>Клик по точке</b> покажет чанк и его вектор целиком.</p>
+        <div id="point-detail" class="point-detail"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<h2 class="h5 mt-4">Состояние сервисов <span class="small text-body-secondary fw-normal">— обновляется каждые 5 с</span></h2>
+<div id="stats" hx-get="/system/stats" hx-trigger="load, every 5s" hx-swap="innerHTML">
+  <div class="text-body-secondary small">загружаю…</div>
+</div>
+
+<section class="mt-4">
+  <h2 class="h5">Два главных сценария</h2>
+  <div class="row g-3">
+    <div class="col-lg-6">
+      <div class="card card-body h-100">
+        <h3 class="h6">📥 Загрузка книги (ingest, асинхронно)</h3>
+        <ol class="small mb-0 flow">
+          <li><span class="t g-client">Браузер</span> HTMX шлёт файл multipart-запросом.</li>
+          <li><span class="t g-app">web</span> пишет файл потоком в <span class="t g-store">uploads</span>, считает sha256 (дубликаты не грузим).</li>
+          <li><span class="t g-app">web</span> → <span class="t g-store">PostgreSQL</span>: строка documents со статусом queued, COMMIT.</li>
+          <li><b>Только после коммита</b> <span class="t g-app">web</span> кладёт задачу (один ID) в <span class="t g-queue">RabbitMQ</span>. Иначе воркер мог бы взять задачу раньше, чем появится строка в БД.</li>
+          <li><span class="t g-app">worker</span> (Celery) забирает задачу и захватывает документ через <code>UPDATE … WHERE status='queued' RETURNING</code>, поэтому дубль задачи ничего не сломает.</li>
+          <li>Парсинг txt (кодировка, главы) → чанки по ~400 токенов токенизатором bge-m3 → тексты в <span class="t g-store">PostgreSQL</span>.</li>
+          <li>Батчи по 32 текста → <span class="t g-ai">Ollama bge-m3</span> → векторы → upsert в <span class="t g-ai">Qdrant</span>. Id точки — uuid5 от (документ, версия, номер), поэтому повторный прогон перезапишет те же точки.</li>
+          <li>Прогресс → <span class="t g-store">Redis</span>; страница агента опрашивает его каждые 2 с.</li>
+          <li>status=done → книга участвует в поиске.</li>
+        </ol>
+      </div>
+    </div>
+    <div class="col-lg-6">
+      <div class="card card-body h-100">
+        <h3 class="h6">💬 Вопрос (синхронно, стримом)</h3>
+        <ol class="small mb-0 flow">
+          <li><span class="t g-client">Браузер</span> POST вопроса → <span class="t g-app">web</span> сохраняет вопрос и пустой ответ в <span class="t g-store">PostgreSQL</span> и возвращает HTML с <code>sse-connect</code>.</li>
+          <li>Браузер открывает <b>SSE-стрим</b>; генерация стартует при подключении.</li>
+          <li>Вопрос → <span class="t g-ai">Ollama</span> → вектор из 1024 чисел (★ на карте).</li>
+          <li>Вектор → <span class="t g-ai">Qdrant</span>: top-k ближайших чанков <b>только этого агента</b> (фильтр agent_id).</li>
+          <li>Промпт = персона + пронумерованные чанки + вопрос → <span class="t g-ai">DeepSeek</span> со stream=true.</li>
+          <li>Токены летят в браузер событиями <code>token</code>, пока LLM ещё пишет.</li>
+          <li>Финал: ответ, цитаты и usage → <span class="t g-store">PostgreSQL</span>, событие <code>done</code> приносит итоговый HTML со ссылками [n].</li>
+        </ol>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="mt-4" id="glossary">
+  <h2 class="h5">Справочник технологий</h2>
+  <div class="row g-3">
+    {% for n in nodes %}
+    <div class="col-md-6 col-xl-4">
+      <div class="card h-100 tech-card g-{{ n.group }}" id="tech-{{ n.id }}">
+        <div class="card-body">
+          <h3 class="h6 mb-0">{{ n.title }}</h3>
+          <div class="small text-body-secondary mb-2">{{ n.subtitle }}</div>
+          <p class="small">{{ n.what }}</p>
+          <p class="small"><b>В Laravel:</b> {{ n.laravel }}</p>
+          <div class="small"><b>В проекте:</b>
+            <ul class="mb-2">{% for i in n.in_project %}<li>{{ i }}</li>{% endfor %}</ul></div>
+          <div class="small">{% for f in n.code %}<code class="me-2">{{ f }}</code>{% endfor %}</div>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <h3 class="h6 mt-4">Библиотеки внутри Python-процессов (web и worker)</h3>
+  <div class="table-responsive">
+    <table class="table table-sm small align-middle">
+      <thead><tr><th>Библиотека</th><th>Что делает</th><th>Аналог в Laravel/PHP</th><th>Где</th></tr></thead>
+      <tbody>
+      {% for l in libs %}
+        <tr><td class="fw-semibold text-nowrap">{{ l.title }}</td><td>{{ l.what }}</td><td>{{ l.laravel }}</td><td><code>{{ l.code }}</code></td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+</div>
+
+<script id="sys-config" type="application/json">{{ {
+  "edges": edges, "nodeW": node_w, "nodeH": node_h, "history": history,
+  "traceEnabled": trace_enabled
+} | tojson }}</script>
+<script src="/static/system.js" defer></script>
+{% endblock %}

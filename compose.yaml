@@ -1,0 +1,280 @@
+name: rag-agents
+
+# Лимиты памяти и порты — ARCHITECTURE §13. Итерация 1: один воркер, без reranker/beat.
+# Эмбеддинги по умолчанию считает Ollama на Windows-хосте (OLLAMA_BASE_URL): в VM нет AVX.
+# Ollama в контейнере — профиль local-ollama: docker compose --profile local-ollama up -d
+# Секреты и пароли — только из .env (compose подставляет ${VAR} из него автоматически).
+# Веб-админки (Qdrant Dashboard, RabbitMQ UI, профиль debug) публикуются на ADMIN_UI_BIND:
+# по умолчанию 127.0.0.1 (SSH-туннель), для доступа с Windows — 192.168.56.10 (host-only сеть).
+
+x-app-env: &app-env
+  APP_ENV: dev
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?set in .env}:${POSTGRES_PASSWORD:?set in .env}@postgres:5432/${POSTGRES_DB:?set in .env}
+  CELERY_BROKER_URL: amqp://${RABBITMQ_DEFAULT_USER:?set in .env}:${RABBITMQ_DEFAULT_PASS:?set in .env}@rabbitmq:5672//
+  REDIS_URL: redis://redis:6379/0
+  QDRANT_URL: http://qdrant:6333
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://10.0.2.2:11434}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3:567m}
+  # Для профиля local-ollama ставьте = cpus сервиса ollama (3): иначе llama.cpp запускает
+  # потоков по числу ядер хоста и упирается в cgroup-квоту. Пусто — решает сама Ollama.
+  EMBEDDING_NUM_THREAD: ${EMBEDDING_NUM_THREAD:-}
+  LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+  LLM_MODEL: ${LLM_MODEL:-deepseek-flash}
+  # Пустое значение = не передавать reasoning_effort провайдеру
+  LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT-low}
+  UPLOAD_DIR: /data/uploads
+  # numpy/OpenBLAS по умолчанию запускает потоков по числу ядер хоста и на cgroup-квоте
+  # контейнера упирается в троттлинг: PCA 653×1024 шла 59 с вместо долей секунды
+  OPENBLAS_NUM_THREADS: "1"
+
+x-app: &app
+  image: rag-agents:dev
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  env_file:
+    - path: .env
+      required: true
+  environment: *app-env
+  volumes:
+    - uploads:/data/uploads
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16.15-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    command: ["postgres", "-c", "shared_buffers=128MB", "-c", "work_mem=8MB", "-c", "max_connections=50"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 512m
+    cpus: 1.0
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4.11-alpine
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redisdata:/data
+    ports:
+      # 6379 на хосте занят системным redis-server (apt, не наш) — публикуем на 6380
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 192m
+    cpus: 0.25
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.13.7-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+      - ./docker/rabbitmq.conf:/etc/rabbitmq/conf.d/20-rag-agents.conf:ro
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "${ADMIN_UI_BIND:-127.0.0.1}:15672:15672"
+    healthcheck:
+      # rabbitmq-diagnostics поднимает отдельную Erlang-VM (~150 МБ) внутри лимита контейнера
+      # и не укладывается в таймаут под нагрузкой — проверяем, что AMQP-порт принимает соединения
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 5672"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    mem_limit: 384m
+    cpus: 0.5
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.19.1
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes:
+      - qdrantdata:/qdrant/storage
+    ports:
+      # REST API + встроенный Dashboard (/dashboard)
+      - "${ADMIN_UI_BIND:-127.0.0.1}:6333:6333"
+      - "127.0.0.1:6334:6334"
+    healthcheck:
+      # В образе нет curl/wget; bash /dev/tcp достаточно для проверки порта
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && printf \"GET /readyz HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q 200 <&3'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 640m
+    cpus: 1.0
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:0.34.4
+    profiles: [local-ollama]
+    environment:
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_KEEP_ALIVE: 24h
+    volumes:
+      - ollamadata:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    mem_limit: 2560m
+    cpus: 3.0
+    restart: unless-stopped
+
+  ollama-pull:
+    image: ollama/ollama:0.34.4
+    profiles: [local-ollama]
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama", "pull", "${EMBEDDING_MODEL:-bge-m3:567m}"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    <<: *app
+    # --timeout-worker-healthcheck: по умолчанию 5 с; на нагруженной VM импорт приложения
+    # занимает до ~40 с, и супервизор uvicorn убивал воркеры до старта
+    command:
+      - uvicorn
+      - rag_agents.web.app:app
+      - --host=0.0.0.0
+      - --port=8000
+      - --workers=2
+      - --proxy-headers
+      - --timeout-worker-healthcheck=120
+    ports:
+      - "0.0.0.0:8080:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+    mem_limit: 448m
+    cpus: 1.5
+
+  worker:
+    <<: *app
+    command:
+      - celery
+      - -A
+      - rag_agents.workers.celery_app:celery_app
+      - worker
+      - -Q
+      - ingest.parse,ingest.embed,maintenance,eval
+      - --concurrency=2
+      - --max-memory-per-child=400000
+      - --loglevel=INFO
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    mem_limit: 640m
+    cpus: 2.0
+
+  # --- Профиль debug: веб-админки для изучения стенда (make up-debug), ~450 МБ ---
+  flower:
+    image: mher/flower:2.0.1
+    profiles: [debug]
+    command:
+      - celery
+      - --broker=amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672//
+      - flower
+      - --port=5555
+      # очереди и их длины Flower берёт из management API RabbitMQ
+      - --broker_api=http://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:15672/api/
+    ports:
+      - "${ADMIN_UI_BIND:-127.0.0.1}:5555:5555"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    mem_limit: 128m
+    cpus: 0.25
+    restart: unless-stopped
+
+  pgweb:
+    image: sosedoff/pgweb:0.16.2
+    profiles: [debug]
+    # --readonly: смотреть и выполнять SELECT; менять данные — через миграции и приложение
+    command: ["--readonly"]
+    environment:
+      PGWEB_DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+    ports:
+      - "${ADMIN_UI_BIND:-127.0.0.1}:8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 64m
+    cpus: 0.25
+    restart: unless-stopped
+
+  redisinsight:
+    image: redis/redisinsight:2.70.1
+    profiles: [debug]
+    environment:
+      # Преднастроенное подключение к нашему Redis (без ручного «Add database»)
+      RI_REDIS_HOST: redis
+      RI_REDIS_PORT: "6379"
+      RI_REDIS_ALIAS: rag-agents
+    volumes:
+      - redisinsightdata:/data
+    ports:
+      - "${ADMIN_UI_BIND:-127.0.0.1}:5540:5540"
+    depends_on:
+      redis:
+        condition: service_healthy
+    mem_limit: 256m
+    cpus: 0.5
+    restart: unless-stopped
+
+volumes:
+  redisinsightdata:
+  pgdata:
+  redisdata:
+  rabbitmqdata:
+  qdrantdata:
+  ollamadata:
+  uploads:

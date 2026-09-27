@@ -21,7 +21,7 @@
 3. `core/`: `Settings` (pydantic-settings), async engine и session, логирование (structlog, минимально).
 4. Alembic + первая миграция: `users` (одна запись seed-пользователя), `agents`, `agent_indexes`, `documents`, `chunks`. Поле `owner_id` есть с первого дня, даже без auth.
 5. Web (Jinja2 + HTMX + Bootstrap через CDN): список агентов, создание агента, страница агента, загрузка одного `.txt`, таблица файлов (статус обновляется по F5 или простому polling).
-6. Celery app + задача `ingest_document` (одна задача без фан-аута): чтение txt (utf-8 / cp1251), наивный чанкинг по абзацам ~400 токенов, эмбеддинги Ollama, upsert в Qdrant (коллекция `chunks__bge_m3__1024`, **сразу** tenant-индекс по `agent_id`).
+6. Celery app + задача `ingest_document` (одна задача без фан-аута): чтение txt (utf-8 / cp1251), наивный чанкинг по абзацам ~400 токенов, эмбеддинги Ollama, upsert в Qdrant (коллекция `chunks__bge_m3_567m__1024`, **сразу** tenant-индекс по `agent_id`).
 7. `llm/`: `OpenAICompatProvider` для DeepSeek (stream).
 8. Query: dense-поиск top-6 с фильтром агента → простой промпт с правилом «только по источникам» → SSE `token`/`done` через `htmx-ext-sse`. Список источников под ответом.
 9. Тесты: unit на чанкер, integration на репозиторий Qdrant (фильтр агента), smoke e2e (скрипт `make smoke`).
@@ -164,7 +164,7 @@ reranker/{app.py, export.py}; eval/calibrate.py; configs/rag/thresholds.yaml
    - `LI-default` — `SentenceSplitter` по умолчанию, dense, стандартный query engine;
    - `LI-tuned` — чанки 400/60, `QdrantVectorStore(enable_hybrid=True)` + fastembed BM25, bge-reranker-v2-m3 как node postprocessor, наш промпт, `MetadataFilters` по `agent_id`; бюджет на настройку ~1 день;
    - `LI-readers` — `LI-tuned` с ридерами LlamaIndex вместо наших парсеров (без FB2).
-2. Общие условия: тот же корпус, `dataset_sha`, bge-m3 через тот же Ollama, `deepseek-chat` с `temperature=0`, тот же judge, `final_k=8`, отдельные коллекции `eval_li__*`.
+2. Общие условия: тот же корпус, `dataset_sha`, bge-m3 через тот же Ollama, `deepseek-flash` с `temperature=0` и одинаковым `LLM_REASONING_EFFORT`, тот же judge, `final_k=8`, отдельные коллекции `eval_li__*`.
 3. Адаптер, чтобы baselines выдавали результат в формате `QueryResult` (цитаты `[n]` → чанки) и считались тем же кодом метрик.
 4. `make compare AGENT=tolstoy` — прогон 4 участников и отчёт.
 5. Качественный разбор:

@@ -1,0 +1,207 @@
+{% macro err(x) -%}
+{% if not x.ok %}<div class="alert alert-warning py-1 px-2 small mb-2">недоступно: {{ x.error }}</div>{% endif %}
+{%- endmacro %}
+{% macro admin_link(key) -%}
+{% set u = admin_by_key.get(key) %}
+{% if u %}
+  {% if u.up %}<a class="small" href="http://{{ host }}:{{ u.port }}{{ u.path }}" target="_blank" rel="noopener">{{ u.title }} ↗</a>
+  {% else %}<span class="small text-body-secondary" title="make up-debug">{{ u.title }}: не запущен</span>{% endif %}
+{% endif %}
+{%- endmacro %}
+
+<div id="admin-uis" hx-swap-oob="true" class="mb-4">
+  <div class="admin-row">
+  {% for u in s.admin_uis %}
+    <div class="admin-card card {% if not u.up %}is-down{% endif %}">
+      <div class="card-body py-2 px-3">
+        <div class="d-flex align-items-center gap-2">
+          <span class="status-dot {{ 'up' if u.up else 'down' }}" aria-hidden="true"></span>
+          {% if u.up %}
+          <a class="fw-semibold" href="http://{{ host }}:{{ u.port }}{{ u.path }}" target="_blank" rel="noopener">{{ u.title }} ↗</a>
+          {% else %}
+          <span class="fw-semibold">{{ u.title }}</span><span class="small text-body-secondary">не запущен</span>
+          {% endif %}
+          <span class="small text-body-secondary ms-auto">:{{ u.port }}</span>
+        </div>
+        <div class="small text-body-secondary mt-1">{{ u.about }}</div>
+      </div>
+    </div>
+  {% endfor %}
+  </div>
+  {% if not s.admin_uis|selectattr('up')|list|length == s.admin_uis|length %}
+  <div class="small text-body-secondary mt-2">Flower, pgweb и RedisInsight входят в compose-профиль <code>debug</code>: <code>make up-debug</code>.
+    Если ссылка не открывается с Windows, проверьте <code>ADMIN_UI_BIND=192.168.56.10</code> в <code>.env</code>.</div>
+  {% endif %}
+</div>
+
+<script type="application/json" id="node-badges">{{ badges | tojson }}</script>
+
+<div class="row g-3">
+  {# --- Qdrant --- #}
+  <div class="col-xl-6">
+    <div class="card h-100 stat-card g-ai">
+      <div class="card-header d-flex align-items-center"><strong>Qdrant</strong>
+        <span class="small text-body-secondary ms-2">{{ s.qdrant.version or '' }}</span>
+        <span class="ms-auto">{{ admin_link('qdrant') }}</span></div>
+      <div class="card-body small">
+        {{ err(s.qdrant) }}
+        {% for col in s.qdrant.collections %}
+        <div class="d-flex flex-wrap gap-3 align-items-baseline mb-2">
+          <code class="fs-6">{{ col.name }}</code>
+          <span class="badge text-bg-{{ 'success' if col.status == 'green' else 'warning' }}">{{ col.status }}</span>
+        </div>
+        <div class="kpis mb-2">
+          <div><div class="kpi">{{ col.points }}</div><div class="kpi-l">точек (чанков)</div></div>
+          <div><div class="kpi">{{ col.segments }}</div><div class="kpi-l">сегментов</div></div>
+          <div><div class="kpi">{{ '{:,}'.format(col.points * 1024).replace(',', ' ') }}</div><div class="kpi-l">чисел в dense-векторах</div></div>
+        </div>
+        <table class="table table-sm mb-2">
+          <tr><th class="w-25">Векторы</th><td>{% for v in col.vectors %}<div>{{ v }}</div>{% endfor %}{% for v in col.sparse_vectors %}<div>{{ v }} <span class="text-body-secondary">(пока пустой, BM25 в итерации 5)</span></div>{% endfor %}</td></tr>
+          <tr><th>HNSW</th><td>{{ col.hnsw }} <div class="text-body-secondary">m=0: общий граф не строится; payload_m=16: отдельный граф внутри каждого agent_id</div></td></tr>
+          <tr><th>Квантование</th><td>{{ col.quantization or 'нет' }} <div class="text-body-secondary">int8-копия в RAM для быстрого поиска (в 4 раза меньше float32)</div></td></tr>
+          <tr><th>Payload-индексы</th><td>{% for p in col.payload_indexes %}<div>{{ p }}</div>{% endfor %}</td></tr>
+        </table>
+        {% if col.per_agent %}
+        <div class="fw-semibold mb-1">Точки по агентам</div>
+        {% set mx = col.per_agent|map(attribute=1)|max %}
+        {% for name, cnt in col.per_agent %}
+          <div class="bar-row"><span class="bar-l text-truncate">{{ name }}</span>
+            <span class="bar"><i style="width: {{ (100 * cnt / mx)|round(1) }}%"></i></span><span class="bar-v">{{ cnt }}</span></div>
+        {% endfor %}
+        {% endif %}
+        {% else %}
+        {% if s.qdrant.ok %}<div class="text-body-secondary">Коллекций ещё нет: создадутся при первой загрузке книги.</div>{% endif %}
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  {# --- RabbitMQ + Celery --- #}
+  <div class="col-xl-6">
+    <div class="card h-100 stat-card g-queue">
+      <div class="card-header d-flex align-items-center gap-2"><strong>RabbitMQ + Celery</strong>
+        <span class="small text-body-secondary">{{ s.celery.rabbit_version or '' }}{% if s.celery.ok %} · соединений {{ s.celery.connections }}{% endif %}</span>
+        <span class="ms-auto d-flex gap-3">{{ admin_link('rabbitmq') }} {{ admin_link('flower') }}</span></div>
+      <div class="card-body small">
+        {{ err(s.celery) }}
+        <table class="table table-sm align-middle">
+          <thead><tr><th>Очередь</th><th class="text-end" title="messages_ready: ждут воркера">ждут</th>
+            <th class="text-end" title="messages_unacknowledged: выданы воркеру, ещё не подтверждены">в работе</th>
+            <th class="text-end" title="сколько воркеров слушают очередь">воркеров</th><th class="text-end">вход/с</th></tr></thead>
+          <tbody>
+          {% for q in s.celery.queues %}
+            <tr class="{{ 'text-body-secondary' if q.is_dlq and not q.ready }}{{ ' table-danger' if q.is_dlq and q.ready }}">
+              <td><code>{{ q.name }}</code>{% if q.is_dlq %} <span class="text-body-secondary">DLQ</span>{% endif %}</td>
+              <td class="text-end {{ 'fw-bold' if q.ready }}">{{ q.ready }}</td>
+              <td class="text-end {{ 'fw-bold' if q.unacked }}">{{ q.unacked }}</td>
+              <td class="text-end">{{ q.consumers }}</td>
+              <td class="text-end">{{ '%.1f'|format(q.publish_rate) }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        <div class="fw-semibold mb-1">Воркеры Celery (inspect active)</div>
+        {% if s.celery.workers is none %}
+          {% if s.celery.ok %}<div class="text-body-secondary">Воркеры не ответили на inspect за 2.5 с (перезапуск или нагрузка) — повторю через 5 с.</div>{% endif %}
+        {% else %}
+        {% for w, tasks in s.celery.workers.items() %}
+          <div class="worker-row"><code>{{ w }}</code> —
+            {% if tasks %}
+              {% for t in tasks %}<div class="ms-3">▶ <b>{{ t.name }}</b>{% if t.runtime_s is not none %} · {{ t.runtime_s }} с{% endif %} <span class="text-body-secondary text-break">{{ t.args }}</span></div>{% endfor %}
+            {% else %}<span class="text-body-secondary">простаивает, ждёт сообщений</span>{% endif %}
+          </div>
+        {% else %}
+          <div class="text-danger">Воркеров нет: задачи будут копиться в очереди.</div>
+        {% endfor %}
+        {% endif %}
+        <div class="text-body-secondary mt-2">Задача сначала «ждёт» (ready), затем воркер берёт её в работу (unacked, prefetch=1), ack после выполнения. Ошибка → сообщение уходит в *.dlq.</div>
+      </div>
+    </div>
+  </div>
+
+  {# --- Ollama --- #}
+  <div class="col-xl-6">
+    <div class="card h-100 stat-card g-ai">
+      <div class="card-header d-flex"><strong>Ollama</strong>
+        <span class="small text-body-secondary ms-2">{{ s.ollama.base_url }}</span></div>
+      <div class="card-body small">
+        {{ err(s.ollama) }}
+        <table class="table table-sm">
+          <thead><tr><th>Модель</th><th>Семейство</th><th title="число обучаемых параметров (весов) нейросети">Весов</th><th title="формат хранения весов">Формат</th><th>На диске</th><th>В RAM</th></tr></thead>
+          <tbody>
+          {% for m in s.ollama.models %}
+            <tr><td><code>{{ m.name }}</code></td><td>{{ m.family or '—' }}</td><td>{{ m.parameters or '—' }}</td><td>{{ m.quantization or '—' }}</td><td>{{ m.size }}</td>
+              <td>{{ '✅ загружена' if m.loaded else '—' }}</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        <div class="text-body-secondary">Веса модели (сотни миллионов чисел) — это «знания» нейросети, они живут в Ollama.
+          В Qdrant лежат её <b>выходы</b>: векторы чанков. Модель выгружается из памяти после простоя (keep_alive), первый запрос после этого медленнее.</div>
+      </div>
+    </div>
+  </div>
+
+  {# --- Redis --- #}
+  <div class="col-xl-6">
+    <div class="card h-100 stat-card g-store">
+      <div class="card-header d-flex"><strong>Redis</strong>
+        <span class="small text-body-secondary ms-2">{{ s.redis.version or '' }}</span>
+        <span class="ms-auto">{{ admin_link('redisinsight') }}</span></div>
+      <div class="card-body small">
+        {{ err(s.redis) }}
+        <div class="kpis mb-2">
+          <div><div class="kpi">{{ s.redis.used_memory or '—' }}</div><div class="kpi-l">память из {{ s.redis.max_memory }}</div></div>
+          <div><div class="kpi">{{ s.redis.ops_per_sec }}</div><div class="kpi-l">операций/с</div></div>
+          <div><div class="kpi">{{ s.redis.clients }}</div><div class="kpi-l">клиентов</div></div>
+        </div>
+        {% for db, v in s.redis.keyspace.items() %}<div><code>{{ db }}</code>: {{ v }}</div>{% endfor %}
+        <table class="table table-sm mt-2 mb-0">
+          <thead><tr><th>Ключ</th><th>Тип</th><th>Значение</th></tr></thead>
+          <tbody>
+          {% for k in s.redis.sample_keys %}
+            <tr><td><code class="text-break">{{ k.key }}</code></td><td>{{ k.kind }}</td><td class="text-break">{{ k.value }}</td></tr>
+          {% else %}<tr><td colspan="3" class="text-body-secondary">ключей нет</td></tr>{% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  {# --- PostgreSQL --- #}
+  <div class="col-xl-6">
+    <div class="card h-100 stat-card g-store">
+      <div class="card-header d-flex"><strong>PostgreSQL</strong>
+        <span class="small text-body-secondary ms-2">{{ s.postgres.version or '' }}{% if s.postgres.db_size %} · БД {{ s.postgres.db_size }}{% endif %}</span>
+        <span class="ms-auto">{{ admin_link('pgweb') }}</span></div>
+      <div class="card-body small">
+        {{ err(s.postgres) }}
+        <table class="table table-sm mb-1">
+          <thead><tr><th>Таблица</th><th class="text-end">Строк (≈)</th><th class="text-end">Размер с индексами</th></tr></thead>
+          <tbody>
+          {% for t in s.postgres.tables %}
+            <tr><td><code>{{ t.name }}</code></td><td class="text-end">{{ t.rows }}</td><td class="text-end">{{ t.size }}</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        <div class="text-body-secondary">Число строк — оценка из статистики (pg_stat_user_tables), точной её делает VACUUM/ANALYZE.</div>
+      </div>
+    </div>
+  </div>
+
+  {# --- LLM --- #}
+  <div class="col-xl-6">
+    <div class="card h-100 stat-card g-ai">
+      <div class="card-header"><strong>LLM</strong></div>
+      <div class="card-body small">
+        <table class="table table-sm mb-2">
+          <tr><th class="w-25">Провайдер</th><td>{{ s.llm.base_url }}</td></tr>
+          <tr><th>Модель</th><td><code>{{ s.llm.model }}</code></td></tr>
+          <tr><th>reasoning_effort</th><td>{{ s.llm.reasoning_effort or 'не передаётся' }}</td></tr>
+          <tr><th>API-ключ</th><td>{{ '✅ задан' if s.llm.key_configured else '❌ не задан (DEEPSEEK_API_KEY)' }}</td></tr>
+        </table>
+        <div class="text-body-secondary">Модель выбирается в .env (LLM_MODEL). Токены, тайминги и стоимость каждого ответа видны
+          под ответом и в событии query.done в журнале.</div>
+      </div>
+    </div>
+  </div>
+</div>

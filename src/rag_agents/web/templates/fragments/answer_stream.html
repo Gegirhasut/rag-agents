@@ -1,0 +1,6 @@
+<div id="msg-{{ a.id }}" class="answer card card-body mb-3" hx-ext="sse"
+     sse-connect="/agents/{{ agent_id }}/messages/{{ a.id }}/stream" sse-close="done">
+  <div sse-swap="sources"><span class="text-secondary small typing">ищу в источниках…</span></div>
+  <div class="answer-stream" sse-swap="token" hx-swap="beforeend"></div>
+  <div class="answer-final" sse-swap="done"></div>
+</div>

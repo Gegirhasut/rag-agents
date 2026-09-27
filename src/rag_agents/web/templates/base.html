@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}RAG-агенты{% endblock %}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="/static/app.css">
+  {% block head %}{% endblock %}
+  <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.11/dist/htmx.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/htmx-ext-sse@2.2.4/dist/sse.min.js"></script>
+</head>
+<body>
+<nav class="navbar navbar-expand bg-body-tertiary border-bottom mb-4">
+  <div class="container">
+    <a class="navbar-brand" href="/">📚 RAG-агенты</a>
+    <div class="d-flex align-items-center gap-3">
+      <a class="nav-link small" href="/system">🔬 Под капотом</a>
+      <span class="navbar-text small text-secondary">итерация 1 · без авторизации</span>
+    </div>
+  </div>
+</nav>
+<main class="container pb-5">
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

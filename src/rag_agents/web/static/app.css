@@ -1,0 +1,9 @@
+.answer-stream { white-space: pre-wrap; }
+/* Пришёл финальный HTML (событие done) — сырой поток токенов и индикатор скрываем */
+.answer:has(.answer-final:not(:empty)) .answer-stream,
+.answer:has(.answer-final:not(:empty)) .typing { display: none; }
+.bubble { max-width: 85%; }
+.source-card { border-left: 3px solid var(--bs-border-color); padding: .25rem .5rem; margin-bottom: .5rem; }
+.source-snippet { max-height: 6.5em; overflow: hidden; }
+.answer-body p:last-child { margin-bottom: 0; }
+a.cite { text-decoration: none; font-size: .85em; vertical-align: super; }

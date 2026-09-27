@@ -1,0 +1,86 @@
+/* Страница «Под капотом» (/system). Цвета групп — категориальная палитра, фиксированный порядок. */
+.sys {
+  --g-client: #8a8983;
+  --g-app: #2a78d6;
+  --g-store: #1baf7a;
+  --g-queue: #eb6834;
+  --g-ai: #4a3aa7;
+  --sys-surface: var(--bs-body-bg);
+  --sys-ink: var(--bs-body-color);
+  --sys-muted: var(--bs-secondary-color);
+  --sys-line: var(--bs-border-color);
+}
+.sys .g-client { --g: var(--g-client); }
+.sys .g-app { --g: var(--g-app); }
+.sys .g-store { --g: var(--g-store); }
+.sys .g-queue { --g: var(--g-queue); }
+.sys .g-ai { --g: var(--g-ai); }
+
+/* --- схема --- */
+#arch { width: 100%; height: auto; display: block; }
+.node { cursor: pointer; outline: none; }
+.node-box { fill: var(--sys-surface); stroke: var(--sys-line); stroke-width: 1.5; transition: stroke .2s, stroke-width .2s; }
+.node-stripe { fill: var(--g); }
+.node-title { font-size: 15px; font-weight: 600; fill: var(--sys-ink); }
+.node-sub { font-size: 12px; fill: var(--sys-muted); }
+.node-badge { font-size: 12px; font-weight: 600; fill: var(--g); }
+.node:hover .node-box, .node:focus-visible .node-box, .node.selected .node-box { stroke: var(--g); stroke-width: 2.5; }
+.node.active .node-box { stroke: var(--g); stroke-width: 3; filter: url(#glow); }
+.node.active { animation: node-pop .6s ease-out; transform-box: fill-box; }
+@keyframes node-pop { 30% { opacity: .75; } 100% { opacity: 1; } }
+
+.edge { fill: none; stroke: var(--sys-line); stroke-width: 2; transition: stroke .3s, stroke-width .3s; }
+.edge.active { stroke: var(--g); stroke-width: 3.5; }
+.dot { fill: var(--g); stroke: var(--sys-surface); stroke-width: 2; }
+.dot-label { font-size: 11px; font-weight: 600; fill: var(--sys-ink); paint-order: stroke; stroke: var(--sys-surface); stroke-width: 4px; }
+
+.legend { display: flex; flex-wrap: wrap; gap: .25rem 1rem; align-items: center; }
+.legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; background: var(--g); margin-right: .35rem; vertical-align: -1px; }
+
+.live-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bs-secondary-bg); flex: none; }
+.live-dot.on { background: var(--g-store); box-shadow: 0 0 0 3px color-mix(in srgb, var(--g-store) 25%, transparent); }
+
+/* --- журнал --- */
+.event-log { max-height: 520px; overflow-y: auto; font-size: .8rem; }
+.event-log li { padding: .35rem .75rem; border-bottom: 1px solid var(--bs-border-color-translucent); border-left: 3px solid var(--g, var(--sys-line)); }
+.event-log li.fresh { animation: fresh 1.5s ease-out; }
+@keyframes fresh { from { background: color-mix(in srgb, var(--g) 18%, transparent); } to { background: transparent; } }
+.event-log .ev-route { font-weight: 600; }
+.event-log .ev-time { color: var(--sys-muted); font-variant-numeric: tabular-nums; }
+.event-log .ev-kind { color: var(--sys-muted); font-family: var(--bs-font-monospace); font-size: .72rem; }
+
+/* --- справочник и описание узла --- */
+.tech-card, #node-info { border-top: 4px solid var(--g, var(--sys-line)); }
+.tech-card.flash { animation: fresh 1.5s ease-out; }
+.t { display: inline-block; padding: 0 .35rem; border-radius: .3rem; font-weight: 600; font-size: .78rem;
+     color: var(--g); background: color-mix(in srgb, var(--g) 12%, transparent); }
+.flow li { margin-bottom: .35rem; }
+
+/* --- админки --- */
+.admin-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: .75rem; }
+.admin-card.is-down { opacity: .7; }
+.status-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.status-dot.up { background: var(--g-store); }
+.status-dot.down { background: var(--bs-secondary-bg); border: 1px solid var(--sys-muted); }
+
+/* --- карточки статистики --- */
+.stat-card { border-top: 4px solid var(--g); }
+.stat-card .table { --bs-table-bg: transparent; }
+.kpis { display: flex; flex-wrap: wrap; gap: 1.5rem; }
+.kpi { font-size: 1.35rem; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.kpi-l { color: var(--sys-muted); font-size: .75rem; }
+.bar-row { display: grid; grid-template-columns: minmax(0, 10rem) 1fr 3.5rem; gap: .5rem; align-items: center; margin-bottom: .25rem; }
+.bar { height: 10px; background: var(--bs-secondary-bg); border-radius: 4px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--g); border-radius: 0 4px 4px 0; }
+.bar-v { text-align: right; font-variant-numeric: tabular-nums; }
+.worker-row { margin-bottom: .35rem; }
+
+/* --- карта векторов --- */
+.map-wrap { position: relative; }
+#map { width: 100%; display: block; border: 1px solid var(--sys-line); border-radius: .5rem; background: var(--sys-surface); cursor: crosshair; }
+.map-tip { position: absolute; pointer-events: none; max-width: 280px; padding: .35rem .5rem; font-size: .75rem;
+           background: var(--bs-body-bg); border: 1px solid var(--sys-line); border-radius: .4rem; box-shadow: 0 4px 14px rgb(0 0 0 / .12); }
+.point-detail .strip { width: 100%; height: 44px; display: block; border-radius: 4px; border: 1px solid var(--sys-line); image-rendering: pixelated; }
+.point-detail .chunk-text { max-height: 12em; overflow: auto; white-space: pre-wrap; background: var(--bs-tertiary-bg); padding: .5rem; border-radius: .4rem; }
+.strip-scale { display: flex; justify-content: space-between; color: var(--sys-muted); font-size: .7rem; }
+#map { height: 460px; }

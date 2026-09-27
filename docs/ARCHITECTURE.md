@@ -298,38 +298,57 @@ Pydantic v2 используется для DTO и контрактов межд
 ```python
 # domain/enums.py
 class DocumentStatus(StrEnum):
-    QUEUED = "queued"; PROCESSING = "processing"; DONE = "done"; FAILED = "failed"; DELETING = "deleting"
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    DONE = "done"
+    FAILED = "failed"
+    DELETING = "deleting"
+
 
 class IngestStage(StrEnum):
-    PARSING = "parsing"; CHUNKING = "chunking"; EMBEDDING = "embedding"; FINALIZING = "finalizing"
+    PARSING = "parsing"
+    CHUNKING = "chunking"
+    EMBEDDING = "embedding"
+    FINALIZING = "finalizing"
+
 
 class SourceFormat(StrEnum):
-    TXT = "txt"; FB2 = "fb2"; EPUB = "epub"; PDF = "pdf"; DOCX = "docx"
+    TXT = "txt"
+    FB2 = "fb2"
+    EPUB = "epub"
+    PDF = "pdf"
+    DOCX = "docx"
+
 
 # domain/agents.py
 class RetrievalSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
     dense_k: int = Field(40, ge=5, le=200)
-    sparse_k: int = Field(40, ge=0, le=200)        # 0 = только dense
-    fused_k: int = Field(30, ge=5, le=100)          # после RRF
+    sparse_k: int = Field(40, ge=0, le=200)  # 0 = только dense
+    fused_k: int = Field(30, ge=5, le=100)  # после RRF
     rerank_enabled: bool = True
-    rerank_candidates: int = Field(16, ge=4, le=50) # сколько из fused_k идёт в reranker (CPU-бюджет)
-    final_k: int = Field(8, ge=1, le=20)            # чанков в контекст
+    rerank_candidates: int = Field(
+        16, ge=4, le=50
+    )  # сколько из fused_k идёт в reranker (CPU-бюджет)
+    final_k: int = Field(8, ge=1, le=20)  # чанков в контекст
     # Пороги отказа «не нашёл». None = глобальный откалиброванный дефолт для текущей
     # модели reranker/эмбеддингов (configs/rag/thresholds.yaml, §15.4). Число = override агента.
     min_rerank_score: float | None = Field(None, ge=0, le=1)
-    min_dense_score: float | None = Field(None, ge=0, le=1)   # при выключенном/упавшем reranker
-    neighbor_window: int = Field(1, ge=0, le=3)     # small-to-big
+    min_dense_score: float | None = Field(None, ge=0, le=1)  # при выключенном/упавшем reranker
+    neighbor_window: int = Field(1, ge=0, le=3)  # small-to-big
     context_token_budget: int = Field(6000, ge=1000, le=24000)
+
 
 class GenerationSettings(BaseModel):
     temperature: float = Field(0.3, ge=0, le=1.5)
     max_output_tokens: int = Field(1200, ge=100, le=4000)
-    llm_chain: list[str] | None = None              # переопределение цепочки провайдеров
+    llm_chain: list[str] | None = None  # переопределение цепочки провайдеров
+
 
 class AgentSettings(BaseModel):
     retrieval: RetrievalSettings = RetrievalSettings()
     generation: GenerationSettings = GenerationSettings()
+
 
 class AgentCreate(BaseModel):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
@@ -338,111 +357,197 @@ class AgentCreate(BaseModel):
     embedding_model: Literal["bge-m3"] = "bge-m3"
     settings: AgentSettings = AgentSettings()
 
+
 class AgentOut(BaseModel):
-    id: UUID; name: str; slug: str; description: str; persona_prompt: str | None
-    embedding_model: str; active_index_id: UUID | None; corpus_version: int
-    documents_count: int; settings: AgentSettings; created_at: datetime
+    id: UUID
+    name: str
+    slug: str
+    description: str
+    persona_prompt: str | None
+    embedding_model: str
+    active_index_id: UUID | None
+    corpus_version: int
+    documents_count: int
+    settings: AgentSettings
+    created_at: datetime
+
 
 # domain/documents.py
 class DocumentOut(BaseModel):
-    id: UUID; agent_id: UUID; filename: str; format: SourceFormat; size_bytes: int
-    status: DocumentStatus; stage: IngestStage | None; progress: int  # 0..100
-    error_code: str | None; error_message: str | None
-    title: str | None; author: str | None; chunks_count: int | None
-    created_at: datetime; finished_at: datetime | None
+    id: UUID
+    agent_id: UUID
+    filename: str
+    format: SourceFormat
+    size_bytes: int
+    status: DocumentStatus
+    stage: IngestStage | None
+    progress: int  # 0..100
+    error_code: str | None
+    error_message: str | None
+    title: str | None
+    author: str | None
+    chunks_count: int | None
+    created_at: datetime
+    finished_at: datetime | None
+
 
 # --- контракты пайплайна (rag/) ---
-class Block(BaseModel):                       # абзац / строка диалога / элемент списка
+class Block(BaseModel):  # абзац / строка диалога / элемент списка
     text: str
-    page: int | None = None                   # PDF: 1-based
+    page: int | None = None  # PDF: 1-based
+
 
 class Section(BaseModel):
-    path: list[str]                           # ["Часть первая", "Глава IV"]
+    path: list[str]  # ["Часть первая", "Глава IV"]
     title: str | None
     level: int
     blocks: list[Block]
 
+
 class ParsedMeta(BaseModel):
-    title: str | None; author: str | None; language: str | None
-    year: str | None; toc_source: Literal["native", "heuristic", "none"]
+    title: str | None
+    author: str | None
+    language: str | None
+    year: str | None
+    toc_source: Literal["native", "heuristic", "none"]
+
 
 # Парсер — генератор секций, чтобы не держать всю книгу в памяти
 class Parser(Protocol):
     format: SourceFormat
+
     def parse(self, path: Path) -> tuple[ParsedMeta, Iterator[Section]]: ...
 
+
 class ChunkDraft(BaseModel):
-    ord: int                                  # сквозной номер в документе
+    ord: int  # сквозной номер в документе
     section_path: list[str]
     chapter_title: str | None
-    text: str                                 # для показа и цитирования
-    embed_text: str                           # contextual header + нормализованный текст
+    text: str  # для показа и цитирования
+    embed_text: str  # contextual header + нормализованный текст
     token_count: int
-    char_start: int; char_end: int            # в очищенном тексте документа
-    page_from: int | None; page_to: int | None
-    content_hash: str                         # sha1(text)
+    char_start: int
+    char_end: int  # в очищенном тексте документа
+    page_from: int | None
+    page_to: int | None
+    content_hash: str  # sha1(text)
+
 
 # --- payload в Qdrant ---
 class ChunkPayload(BaseModel):
-    agent_id: str                             # tenant key
+    agent_id: str  # tenant key
     document_id: str
-    chunk_id: str                             # = point id
+    chunk_id: str  # = point id
     ord: int
-    book_title: str | None; author: str | None
-    section_path: list[str]; chapter_title: str | None
-    page_from: int | None; page_to: int | None
-    text: str                                 # чтобы не ходить в PG на горячем пути
+    book_title: str | None
+    author: str | None
+    section_path: list[str]
+    chapter_title: str | None
+    page_from: int | None
+    page_to: int | None
+    text: str  # чтобы не ходить в PG на горячем пути
+
 
 # --- сообщения очередей (только идентификаторы) ---
 class ParseTask(BaseModel):
-    document_id: UUID; job_id: UUID; index_id: UUID
+    document_id: UUID
+    job_id: UUID
+    index_id: UUID
+
 
 class EmbedBatchTask(BaseModel):
-    document_id: UUID; job_id: UUID; index_id: UUID; batch_no: int
+    document_id: UUID
+    job_id: UUID
+    index_id: UUID
+    batch_no: int
+
 
 class ReindexTask(BaseModel):
-    agent_id: UUID; target_index_id: UUID
+    agent_id: UUID
+    target_index_id: UUID
+
 
 # --- retrieval / ответ ---
 class RetrievedChunk(BaseModel):
-    chunk_id: UUID; document_id: UUID; ord: int
-    text: str; payload: ChunkPayload
-    dense_rank: int | None; sparse_rank: int | None
-    fused_score: float; rerank_score: float | None
+    chunk_id: UUID
+    document_id: UUID
+    ord: int
+    text: str
+    payload: ChunkPayload
+    dense_rank: int | None
+    sparse_rank: int | None
+    fused_score: float
+    rerank_score: float | None
+
 
 class Citation(BaseModel):
-    n: int                                    # номер [n] в ответе
-    chunk_id: UUID; document_id: UUID
-    book_title: str | None; author: str | None
-    chapter_title: str | None; section_path: list[str]
-    page_from: int | None; page_to: int | None
-    snippet: str                              # ≤ 400 символов
+    n: int  # номер [n] в ответе
+    chunk_id: UUID
+    document_id: UUID
+    book_title: str | None
+    author: str | None
+    chapter_title: str | None
+    section_path: list[str]
+    page_from: int | None
+    page_to: int | None
+    snippet: str  # ≤ 400 символов
+
 
 class QueryRequest(BaseModel):
     question: str = Field(min_length=2, max_length=2000)
     chat_id: UUID | None = None
     stream: bool = True
 
+
 class AnswerUsage(BaseModel):
-    provider: str; model: str
-    input_tokens: int; output_tokens: int; cached_input_tokens: int = 0
+    provider: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int = 0
     cost_usd: Decimal | None
-    t_retrieval_ms: int; t_rerank_ms: int | None; t_first_token_ms: int | None; t_total_ms: int
+    t_retrieval_ms: int
+    t_rerank_ms: int | None
+    t_first_token_ms: int | None
+    t_total_ms: int
+
 
 class QueryResult(BaseModel):
     answer_md: str
-    refused: bool                             # «не нашёл в источниках»
-    grounded: bool                            # есть ≥1 валидная цитата или refused
+    refused: bool  # «не нашёл в источниках»
+    grounded: bool  # есть ≥1 валидная цитата или refused
     citations: list[Citation]
     usage: AnswerUsage | None
     trace_id: str | None
 
+
 # --- события стрима (API: JSON в data; web: HTML-фрагменты) ---
-class TokenEvent(BaseModel):   type: Literal["token"] = "token"; delta: str
-class SourcesEvent(BaseModel): type: Literal["sources"] = "sources"; citations: list[Citation]
-class DoneEvent(BaseModel):    type: Literal["done"] = "done"; result: QueryResult
-class ErrorEvent(BaseModel):   type: Literal["error"] = "error"; code: str; message: str; retryable: bool
-StreamEvent = Annotated[TokenEvent | SourcesEvent | DoneEvent | ErrorEvent, Field(discriminator="type")]
+class TokenEvent(BaseModel):
+    type: Literal["token"] = "token"
+    delta: str
+
+
+class SourcesEvent(BaseModel):
+    type: Literal["sources"] = "sources"
+    citations: list[Citation]
+
+
+class DoneEvent(BaseModel):
+    type: Literal["done"] = "done"
+    result: QueryResult
+
+
+class ErrorEvent(BaseModel):
+    type: Literal["error"] = "error"
+    code: str
+    message: str
+    retryable: bool
+
+
+StreamEvent = Annotated[
+    TokenEvent | SourcesEvent | DoneEvent | ErrorEvent, Field(discriminator="type")
+]
+
 
 # --- LLM (llm/) ---
 class LLMMessage(BaseModel):
@@ -451,26 +556,37 @@ class LLMMessage(BaseModel):
     tool_calls: list["ToolCall"] | None = None
     tool_call_id: str | None = None
 
+
 class ToolSpec(BaseModel):
-    name: str; description: str; parameters: dict[str, Any]   # JSON Schema
+    name: str
+    description: str
+    parameters: dict[str, Any]  # JSON Schema
+
 
 class ToolCall(BaseModel):
-    id: str; name: str; arguments: dict[str, Any]
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
 
 class LLMRequest(BaseModel):
     messages: list[LLMMessage]
     tools: list[ToolSpec] = []
-    temperature: float = 0.3; max_tokens: int = 1200
+    temperature: float = 0.3
+    max_tokens: int = 1200
     purpose: Literal["answer", "condense", "judge", "agent_step"] = "answer"
 
-class LLMChunk(BaseModel):                    # элемент стрима провайдера
+
+class LLMChunk(BaseModel):  # элемент стрима провайдера
     delta: str = ""
     tool_calls: list[ToolCall] | None = None  # приходят целиком, после сборки из дельт
     finish_reason: str | None = None
-    usage: "LLMUsage | None" = None           # в последнем чанке
+    usage: "LLMUsage | None" = None  # в последнем чанке
+
 
 class LLMProvider(Protocol):
     name: str
+
     async def stream(self, req: LLMRequest, model: str) -> AsyncIterator[LLMChunk]: ...
     async def complete(self, req: LLMRequest, model: str) -> LLMResponse: ...
 ```
@@ -779,7 +895,7 @@ CREATE TYPE index_status AS ENUM ('building', 'active', 'retired');
 CREATE TABLE agent_indexes (
   id uuid PRIMARY KEY, agent_id uuid NOT NULL REFERENCES agents ON DELETE CASCADE,
   embedding_model text NOT NULL,                 -- 'bge-m3'
-  dim int NOT NULL, collection text NOT NULL,    -- 'chunks__bge_m3__1024'
+  dim int NOT NULL, collection text NOT NULL,    -- 'chunks__bge_m3_567m__1024'
   chunking_version int NOT NULL DEFAULT 1,
   status index_status NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), activated_at timestamptz
 );
@@ -876,21 +992,25 @@ CREATE TABLE eval_items (
 
 ### 9.1 Коллекции
 
-Одна коллекция на **(модель эмбеддингов, размерность)**: `chunks__bge_m3__1024`.
+Одна коллекция на **(модель эмбеддингов, размерность)**: `chunks__bge_m3_567m__1024`. Имя строится из тега модели Ollama (`bge-m3:567m` — тег зафиксирован, чтобы `latest` не подменил веса под существующими векторами) и размерности: `{prefix}chunks__{sanitized_model}__{dim}`.
 
 ```python
 client.create_collection(
-    "chunks__bge_m3__1024",
+    "chunks__bge_m3_567m__1024",
     vectors_config={"dense": VectorParams(size=1024, distance=Distance.COSINE, on_disk=True)},
     sparse_vectors_config={"bm25": SparseVectorParams(modifier=Modifier.IDF)},
-    hnsw_config=HnswConfigDiff(m=0, payload_m=16),        # граф только per-tenant
+    hnsw_config=HnswConfigDiff(m=0, payload_m=16),  # граф только per-tenant
     quantization_config=ScalarQuantization(
-        scalar=ScalarQuantizationConfig(type=ScalarType.INT8, always_ram=True)),
+        scalar=ScalarQuantizationConfig(type=ScalarType.INT8, always_ram=True)
+    ),
     optimizers_config=OptimizersConfigDiff(memmap_threshold=20000),
 )
-client.create_payload_index("chunks__bge_m3__1024", "agent_id",
-    field_schema=KeywordIndexParams(type="keyword", is_tenant=True))
-client.create_payload_index("chunks__bge_m3__1024", "document_id", field_schema="keyword")
+client.create_payload_index(
+    "chunks__bge_m3_567m__1024",
+    "agent_id",
+    field_schema=KeywordIndexParams(type="keyword", is_tenant=True),
+)
+client.create_payload_index("chunks__bge_m3_567m__1024", "document_id", field_schema="keyword")
 ```
 
 - `m=0, payload_m=16`: глобальный HNSW не строится, строятся графы по каждому `agent_id`. Запрос без фильтра по агенту шёл бы полным перебором, но таких запросов в коде нет (репозиторий этого не позволяет).
@@ -944,13 +1064,17 @@ flowchart LR
 ### 10.2 Настройки Celery
 
 ```python
-task_acks_late = True                       # ack после выполнения: падение воркера → redelivery
-task_reject_on_worker_lost = True           # OOM-kill процесса → сообщение вернётся
-task_acks_on_failure_or_timeout = False     # необработанная ошибка → reject → DLX
-worker_prefetch_multiplier = 1              # длинные задачи, честное распределение
-task_time_limit = 1500; task_soft_time_limit = 1200   # < consumer_timeout RabbitMQ (30 мин)
-worker_max_tasks_per_child = 50; worker_max_memory_per_child = 400_000  # KiB, защита от утечек парсеров
-task_serializer = "json"; result_backend = "redis://…/1"; task_ignore_result = True  # результаты не нужны
+task_acks_late = True  # ack после выполнения: падение воркера → redelivery
+task_reject_on_worker_lost = True  # OOM-kill процесса → сообщение вернётся
+task_acks_on_failure_or_timeout = False  # необработанная ошибка → reject → DLX
+worker_prefetch_multiplier = 1  # длинные задачи, честное распределение
+task_time_limit = 1500
+task_soft_time_limit = 1200  # < consumer_timeout RabbitMQ (30 мин)
+worker_max_tasks_per_child = 50
+worker_max_memory_per_child = 400_000  # KiB, защита от утечек парсеров
+task_serializer = "json"
+result_backend = "redis://…/1"
+task_ignore_result = True  # результаты не нужны
 broker_connection_retry_on_startup = True
 ```
 
@@ -1014,28 +1138,33 @@ broker_connection_retry_on_startup = True
 ### 12.1 Провайдеры
 | Провайдер | Реализация | Модели (конфиг) |
 |---|---|---|
-| DeepSeek | `OpenAICompatProvider(base_url="https://api.deepseek.com")` | `deepseek-chat` (ответы, condense), `deepseek-reasoner` (опционально judge) |
+| DeepSeek | `OpenAICompatProvider(base_url="https://api.deepseek.com")` | `deepseek-flash` (DeepSeek-V4.1-Flash: ответы, condense), `deepseek-v4-pro` (опционально judge). Обе модели — reasoning, см. §12.3 |
 | Anthropic | `AnthropicProvider` (`anthropic` SDK, Messages API, streaming, tools) | `claude-sonnet-5` (fallback для ответов), `claude-haiku-4-5-20251001` (дешёвый fallback, condense) |
 | OpenAI | `OpenAICompatProvider` | конфиг |
-| Ollama | `OpenAICompatProvider(base_url=".../v1")` | локальная модель на **Windows-хосте** (`192.168.56.1:11434`). На VM под LLM нет памяти |
+| Ollama | `OpenAICompatProvider(base_url=".../v1")` | локальная модель на **Windows-хосте** (`http://10.0.2.2:11434`, NAT с `--nat-localhostreachable1`). На VM под LLM нет памяти |
 
 Имена моделей задаются только в `.env` и в конфиге, в коде их нет.
 
 ### 12.2 Роутер и fallback
 ```python
 class LLMRouter:
-    chain: list[ProviderModel]            # из LLM_CHAIN="deepseek:deepseek-chat,anthropic:claude-sonnet-5"
+    chain: list[ProviderModel]  # из LLM_CHAIN="deepseek:deepseek-flash,anthropic:claude-sonnet-5"
+
     async def stream(self, req) -> AsyncIterator[LLMChunk]:
         for pm in self.chain:
-            if breaker.is_open(pm.provider): continue
+            if breaker.is_open(pm.provider):
+                continue
             try:
                 it = pm.provider.stream(req, pm.model)
                 first = await asyncio.wait_for(anext(it), timeout=FIRST_TOKEN_TIMEOUT)  # 20 s
-            except RETRYABLE as e:          # timeout, 429, 5xx, connect, 401 (алерт)
-                breaker.record_failure(pm.provider); log; continue
+            except RETRYABLE as e:  # timeout, 429, 5xx, connect, 401 (алерт)
+                breaker.record_failure(pm.provider)
+                log
+                continue
             breaker.record_success(pm.provider)
             yield first
-            async for ch in it: yield ch    # после первого токена — без fallback
+            async for ch in it:
+                yield ch  # после первого токена — без fallback
             return
         raise AllProvidersFailed
 ```
@@ -1047,6 +1176,18 @@ class LLMRouter:
 - **Function calling:** `ToolSpec` → OpenAI `tools` / Anthropic `tools`. Дельты `tool_calls` собираются адаптером, наружу `ToolCall` выходит целиком. Агентный цикл (итерация 8): ≤ 3 шагов `search_sources`, затем финальный ответ стримом.
 - **Учёт стоимости:** таблица цен в конфиге (`llm_prices.yaml`: провайдер, модель, input, cached input, output за 1M), `cost_usd` пишется в `usage` и в Langfuse.
 
+### 12.3 Reasoning-модели и `LLM_REASONING_EFFORT`
+
+Проверено на API 2026-09-24: `GET /models` отдаёт только `deepseek-flash` и `deepseek-v4-pro`, `deepseek-chat` больше нет. Обе модели рассуждают перед ответом:
+- в стриме `delta.reasoning_content` идёт **до** `delta.content`;
+- в `usage.completion_tokens_details.reasoning_tokens` видно, сколько токенов ушло на рассуждения;
+- глубина задаётся параметром `reasoning_effort`: `low` / `high` / `max`, по умолчанию у провайдера `high`.
+
+Решения:
+- `reasoning_effort` — **настройка** `LLM_REASONING_EFFORT` в `.env`, по умолчанию `low` (меньше латентность до первого токена ответа). Пустое значение означает не передавать параметр, тогда действует дефолт провайдера. Значение пишется в `usage` сообщения и показывается под ответом. Это позволяет сравнивать `low` и `high` по качеству в eval (итерации 4–5) при прочих равных.
+- Адаптер **не отдаёт** `reasoning_content` наружу: пользователь видит только ответ. Рассуждения учитываются в `reasoning_tokens` и в стоимости.
+- **TTFT** считается по первому токену `content`, а не по первому байту стрима: рассуждения — это ожидание, которое пользователь переживает до начала ответа.
+
 ---
 
 ## 13. Развёртывание: порты и память
@@ -1054,18 +1195,20 @@ class LLMRouter:
 Laravel, php-fpm и nginx из исходного плана убраны. UI отдаёт uvicorn напрямую. Для прода перед ним встанет reverse-proxy с TLS (с `X-Accel-Buffering: no` для SSE).
 
 ### 13.1 Порты
-Docker обходит ufw, поэтому всё служебное публикуется только на `127.0.0.1`. Наружу (в host-only сеть к Windows) открыт только web.
+Docker обходит ufw, поэтому всё служебное публикуется только на `127.0.0.1`. Наружу (в host-only сеть к Windows) открыт web. Веб-админки (Qdrant Dashboard, RabbitMQ UI, профиль `debug`) публикуются на `${ADMIN_UI_BIND:-127.0.0.1}`: в dev-VM в `.env` стоит `192.168.56.10` (host-only сеть, видна только Windows-хосту). У pgweb, RedisInsight, Flower и Qdrant нет своей авторизации, поэтому на машине, доступной из внешней сети, `ADMIN_UI_BIND` оставляем пустым и ходим через SSH-туннель.
 
 | Сервис | Порт в контейнере | Публикация на хосте | Доступ |
 |---|---|---|---|
 | web (uvicorn) | 8000 | `0.0.0.0:8080` | `http://192.168.56.10:8080` с Windows |
 | reranker | 8000 | — (только docker-сеть) | `http://reranker:8000` |
 | PostgreSQL | 5432 | `127.0.0.1:5432` | SSH-туннель / DBeaver |
-| Redis | 6379 | `127.0.0.1:6379` | — |
-| RabbitMQ AMQP / UI | 5672 / 15672 | `127.0.0.1:5672` / `127.0.0.1:15672` | UI через SSH-туннель |
-| Qdrant HTTP / gRPC | 6333 / 6334 | `127.0.0.1:6333` / `127.0.0.1:6334` | Dashboard через SSH-туннель |
+| Redis | 6379 | `127.0.0.1:6380` (6379 на VM занят системным `redis-server`, установленным вне проекта) | — |
+| RabbitMQ AMQP / UI | 5672 / 15672 | `127.0.0.1:5672` / `ADMIN_UI_BIND:15672` | Management UI |
+| Qdrant HTTP / gRPC | 6333 / 6334 | `ADMIN_UI_BIND:6333` / `127.0.0.1:6334` | REST + Dashboard (`/dashboard`) |
 | Ollama | 11434 | `127.0.0.1:11434` | — |
-| Flower (профиль `debug`) | 5555 | `127.0.0.1:5555` | SSH-туннель |
+| Flower (профиль `debug`) | 5555 | `ADMIN_UI_BIND:5555` | мониторинг Celery |
+| pgweb (профиль `debug`) | 8081 | `ADMIN_UI_BIND:8081` | PostgreSQL, `--readonly` |
+| RedisInsight (профиль `debug`) | 5540 | `ADMIN_UI_BIND:5540` | GUI Redis |
 | Streamlit-админка (итерация 10) | 8501 | `127.0.0.1:8501` | SSH-туннель |
 | MCP-сервер (итерация 10, HTTP) | 8000 | `127.0.0.1:8090` | — |
 | Langfuse self-hosted (профиль `observability`) | 3000 | `127.0.0.1:3000` | только при 16 ГБ |
@@ -1077,9 +1220,9 @@ Docker обходит ufw, поэтому всё служебное публик
 | ollama (bge-m3, CPU) | **2.5g** | 3.0 | `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_MAX_LOADED_MODELS=1`, `OLLAMA_KEEP_ALIVE=24h`. Модель F16 ~1.2 ГБ + буферы |
 | reranker | **1g** | 3.0 | bge-reranker-v2-m3 int8 ONNX ~570 МБ + арена ORT; `intra_op_num_threads=3`, `enable_cpu_mem_arena` с лимитом |
 | qdrant | 640m | 1.0 | `on_disk` векторы, int8-квантование в RAM |
-| worker-ingest | 640m | 2.0 | `--concurrency=2`, `--max-memory-per-child=400000` |
+| worker-ingest | 640m | 2.0 | `--concurrency=2`, `--max-memory-per-child=400000`. Токенизатор bge-m3 (~240 МБ в RAM, замер) грузится в родителе до fork (`preload_worker_resources`), дети делят его через copy-on-write: пик ~550 МБ. Без этого 2 × 370 МБ + родитель уходили в swap, ingest «Исповеди» — 177 с вместо 15 с |
 | postgres | 512m | 1.0 | `shared_buffers=128MB`, `work_mem=8MB`, `max_connections=50` |
-| web (uvicorn) | 448m | 1.5 | 2 воркера (`--workers 2`); BM25-энкодер и токенизатор ~60 МБ на процесс |
+| web (uvicorn) | 448m | 1.5 | 2 воркера (`--workers 2`); BM25-энкодер ~60 МБ на процесс. Токенизатор bge-m3 весит ~240 МБ на процесс: uvicorn `--workers` запускает процессы через `spawn`, CoW не поможет. Если web понадобится считать токены — пересчитать лимит (+~240 МБ × воркеры) |
 | rabbitmq | 384m | 0.5 | `vm_memory_high_watermark.absolute=256MiB` |
 | worker-embed | 256m | 0.5 | `--concurrency=2` (I/O, ждёт Ollama) |
 | redis | 192m | 0.25 | `maxmemory 128mb`, `allkeys-lru` (сессии — в отдельной БД; для них `volatile-lru` при росте) |
@@ -1088,12 +1231,12 @@ Docker обходит ufw, поэтому всё служебное публик
 
 По сравнению с прошлой раскладкой ушли php-fpm (384m), laravel queue (192m) и nginx (64m). Добавились reranker (1g), второй воркер и beat. Итог вырос на ~0.5 GiB (6.1 → 6.6). Одноразовый `reranker-export` (torch, ~2 ГБ пиково) запускается один раз при **остановленном** стеке. Перекос покрывается так:
 - **Во время массового ingest** reranker простаивает. Если Ollama упрётся в лимит, первым шагом поднимаем ollama до 3g, а reranker останавливаем на время массовой заливки (вопросы деградируют до RRF) или переключаем на mMiniLM (~384m).
-- Flower (`debug`, ~100m) и eval-прогоны запускаем при необходимости, они не держатся постоянно.
+- Профиль `debug` (Flower 128m, pgweb 64m, RedisInsight 256m, итого ~450m) и eval-прогоны запускаем при необходимости, они не держатся постоянно. Пока Ollama и reranker не живут в VM (итерация 1), запас на `debug` есть.
 - **Langfuse self-hosted не помещается:** web + worker (~1.2 GiB) + ClickHouse (≥ 1–1.5 GiB для стабильной работы) + MinIO (~150 МБ) + свой Redis и PG (~300 МБ) ≈ **3–3.5 GiB**. Это больше всего запаса VM даже без Ollama. Поэтому **Langfuse Cloud**, а self-hosted — compose-профиль `observability` на случай апгрейда VM до 16 ГБ (A7).
 
 ### 13.3 Compose-профили
 - по умолчанию: `web, worker-ingest, worker-embed, beat, reranker, ollama, postgres, redis, rabbitmq, qdrant`;
-- `debug`: `flower`;
+- `debug`: `flower`, `pgweb`, `redisinsight` (`make up-debug`; ссылки на них — на странице `/system`);
 - `observability`: `langfuse-web, langfuse-worker, clickhouse, minio` (только 16 ГБ+);
 - `admin` (итерация 10): `streamlit`;
 - `tools` (одноразовые): `reranker-export`, `ollama-pull`.
@@ -1127,6 +1270,16 @@ Healthchecks у всех хранилищ. `depends_on: condition: service_healt
 
 ---
 
+### 14.4 Страница «Под капотом» (`/system`)
+Учебный dev-инструмент: наглядно показывает, как работает стенд. Это не замена Langfuse и метрикам.
+- **Живая схема.** Сервисы `web`, `worker` на шагах пайплайна вызывают `TraceBus.emit(kind, src, dst, label, **data)` (`services/trace.py`). Событие `TraceEvent` (`domain/system.py`) публикуется в Redis pub/sub `trace:events`, последние 150 хранятся в списке `trace:history`. Страница подписывается через SSE `GET /system/events` и анимирует переход src → dst. Pub/sub, а не очередь: без подписчика событие теряется, это нормально. Ошибка Redis не ломает основной сценарий (warning в лог).
+- **Что попадает в событие:** тайминги, размеры, число чанков, скоры, названия книг и глав, вектор вопроса (1024 числа, для проекции на карту). Текстов вопросов и чанков нет. Выключается `TRACE_ENABLED=false`. С итерации 2 страница доступна только админу.
+- **Карта векторов.** `GET /system/agents/{id}/vector-map` отдаёт PCA-проекцию (numpy SVD) всех dense-векторов агента на 2D, а также среднее и 2 компоненты. По ним браузер проецирует вектор вопроса из события `query.embedded` и подсвечивает попадания из `query.found`. Кэш в процессе держится до смены `corpus_version`. `GET /system/agents/{id}/points/{point_id}` отдаёт чанк и его вектор целиком. Оба пути проверяют владельца и фильтруют по `agent_id` (`test_isolation.py`).
+- **Снимок инфраструктуры** `GET /system/stats` (htmx, раз в 5 с): Qdrant (`get_collection`, `count` по агентам), RabbitMQ management API (`/api/queues`), Celery `inspect().active()` (в потоке, таймаут 1 с), Redis `INFO` и выборка ключей, `pg_stat_user_tables`, Ollama `/api/tags` и `/api/ps`, а также доступность веб-админок профиля `debug`. Каждый источник опрашивается с таймаутом 2.5 с: недоступный сервис даёт карточку с ошибкой, а не 500.
+- Celery шлёт события задач (`worker_send_task_events`) для Flower.
+
+---
+
 ## 15. Оценка качества
 
 ### 15.1 Golden-датасет
@@ -1152,7 +1305,7 @@ Healthchecks у всех хранилищ. `depends_on: condition: service_healt
 | Цитаты | citation validity, citation support | доля валидных `[n]`; LLM-judge: подтверждает ли источник [n] утверждение рядом |
 | Эксплуатация | TTFT, total latency p50/p95, токены, $ | из `usage` |
 
-- **Judge-LLM**: `deepseek-chat` (дёшево) и выборочная сверка 10 % через `claude-sonnet-5`, чтобы оценить смещение судьи (judge self-preference). RAGAS подключается через его OpenAI-совместимый LLM-wrapper с base_url DeepSeek. Эмбеддинги для RAGAS берутся из того же Ollama.
+- **Judge-LLM**: `deepseek-flash` (дёшево) и выборочная сверка 10 % через `claude-sonnet-5`, чтобы оценить смещение судьи (judge self-preference). RAGAS подключается через его OpenAI-совместимый LLM-wrapper с base_url DeepSeek. Эмбеддинги для RAGAS берутся из того же Ollama.
 - **Runner**: `python -m rag_agents.eval run --agent tolstoy --config configs/eval/hybrid_rerank.yaml` вызывает **тот же `QueryService`**, что и прод (без HTTP), с отключённым кэшем. Результат — `eval_runs`/`eval_items` + `reports/eval/<date>_<config>.md` со сводной таблицей и худшими 10 примерами.
 - **Конфигурации своего ядра** (итерация 5): `dense` → `hybrid` (RRF) → `hybrid_rerank` → `+neighbors`; размеры чанка `c256` / `c400` / `c800` (каждый требует отдельного индекса); reranker `bge-v2-m3` vs `mmarco-mMiniLM`.
 - **Статистика.** При 50 вопросах разница в несколько пунктов может быть шумом. Для сравнения двух конфигураций используется парный bootstrap по вопросам (10 000 ресэмплов): 95 % CI разницы метрики. «Улучшение» — только если CI не пересекает 0.
@@ -1165,7 +1318,7 @@ Healthchecks у всех хранилищ. `depends_on: condition: service_healt
 **Фиксируется одинаковым для всех участников:**
 - корпус (те же файлы демо-агента) и golden-датасет (тот же `dataset_sha`);
 - модель эмбеддингов `bge-m3` через тот же Ollama (`llama-index-embeddings-ollama`);
-- LLM `deepseek-chat` с `temperature=0`, тот же `max_tokens`; judge и версия RAGAS те же;
+- LLM `deepseek-flash` с `temperature=0` и тем же `LLM_REASONING_EFFORT`, тот же `max_tokens`; judge и версия RAGAS те же;
 - число фрагментов в контексте (`final_k=8`) и бюджет контекста;
 - **текст на входе:** LlamaIndex получает наши распарсенные и очищенные секции как `Document` (у `SimpleDirectoryReader` нет FB2, а сравнивать парсеры здесь не цель). Отдельной строкой — `LI-readers`: собственные ридеры LlamaIndex для форматов, которые он умеет (pdf, epub, docx, txt). Так виден вклад парсинга.
 
