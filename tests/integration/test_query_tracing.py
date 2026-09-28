@@ -138,9 +138,9 @@ async def test_question_produces_trace_with_retrieval_and_generation(
     assert found is not None
     assert found[0].trace_id == root.trace_id
     assert found[0].usage is not None
-    assert found[0].usage["cost_usd"] == pytest.approx(cost["total"])
-    assert found[0].usage["t_embed_ms"] is not None
-    assert found[0].usage["t_search_ms"] is not None
+    assert found[0].usage.cost_usd == pytest.approx(cost["total"])
+    assert found[0].usage.t_embed_ms is not None
+    assert found[0].usage.t_search_ms is not None
 
 
 async def test_feedback_is_saved_and_sent_as_score(

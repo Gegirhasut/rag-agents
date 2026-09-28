@@ -4,6 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+from rag_agents.domain.answers import AnswerUsage
 from rag_agents.domain.enums import MessageRole, MessageStatus
 
 
@@ -27,7 +28,9 @@ class MessageOut(BaseModel):
     status: MessageStatus
     citations: list[dict[str, Any]] | None
     refused: bool | None
-    usage: dict[str, Any] | None
+    # jsonb → модель: у ответов из ранних итераций нет новых полей (cost_*, t_embed_ms …),
+    # AnswerUsage заполняет их дефолтами, и шаблоны не видят «сырого» dict
+    usage: AnswerUsage | None
     trace_id: str | None = None
     feedback: int | None = None
     created_at: datetime

@@ -183,7 +183,7 @@ class QueryService:
                     answer_md=msg.content,
                     refused=bool(msg.refused),
                     citations=citations,
-                    usage=AnswerUsage.model_validate(msg.usage) if msg.usage else None,
+                    usage=msg.usage,
                     trace_id=msg.trace_id,
                 )
             )
