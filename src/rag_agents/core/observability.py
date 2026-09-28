@@ -38,6 +38,7 @@ class ObservationFields(TypedDict, total=False):
     model: str
     model_parameters: dict[str, str | int | float | bool | None]
     usage_details: dict[str, int]
+    cost_details: dict[str, float]
     completion_start_time: datetime
 
 

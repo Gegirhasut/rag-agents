@@ -1,4 +1,4 @@
-"""Страница «Аналитика»: метрики и трейсы из Langfuse у нас в UI (ARCHITECTURE §14.5)."""
+"""Страница «Аналитика»: сводка из нашей БД, трейсы — из Langfuse (ARCHITECTURE §14.5)."""
 
 from typing import Annotated
 
@@ -43,12 +43,8 @@ async def insights_page(
 async def insights_overview(
     request: Request, c: ContainerDep, owner: OwnerDep, period: PeriodQuery = Period.DAY
 ) -> Response:
-    try:
-        data = await c.insights.overview(owner, period)
-    except InsightsDisabledError:
-        return _unavailable(request)
-    except InsightsUnavailableError as e:
-        return _unavailable(request, str(e))
+    """Сводка из PG: работает без Langfuse и без лимитов его API."""
+    data = await c.insights.overview(owner, period)
     return templates.TemplateResponse(request, "fragments/insights_overview.html", {"o": data})
 
 

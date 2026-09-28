@@ -1,8 +1,8 @@
 from datetime import timedelta
 from uuid import UUID
 
-from sqlalchemy import or_, select, update
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import or_, select, type_coerce, update
+from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_agents.core.ids import utcnow
@@ -124,11 +124,18 @@ class DocumentRepository:
             update(Document).where(Document.id == document_id).values(heartbeat_at=utcnow())
         )
 
-    async def mark_done(self, document_id: UUID) -> None:
+    async def mark_done(self, document_id: UUID, timings: dict[str, int] | None = None) -> None:
+        """timings (мс по шагам) дописываются в meta.timings, остальной meta не трогаем."""
+        patch = type_coerce({"timings": timings or {}}, JSONB)
         await self.s.execute(
             update(Document)
             .where(Document.id == document_id)
-            .values(status=DocumentStatus.DONE, stage=None, finished_at=utcnow())
+            .values(
+                status=DocumentStatus.DONE,
+                stage=None,
+                finished_at=utcnow(),
+                meta=Document.meta.op("||")(patch),
+            )
         )
 
     async def mark_failed(self, document_id: UUID, code: str, message: str) -> None:

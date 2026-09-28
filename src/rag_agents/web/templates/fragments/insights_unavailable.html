@@ -1,12 +1,13 @@
 {% if error %}
 <div class="alert alert-warning">
-  <strong>Langfuse сейчас не отвечает.</strong> Приложение работает как обычно, а трейсы допишутся,
-  когда связь вернётся. Страница попробует обновиться через минуту.
+  <strong>Дерево шагов из Langfuse сейчас недоступно.</strong> Сводка на странице считается по нашей
+  базе и работает; приложение и запись трейсов не затронуты.
   <div class="small text-body-secondary mt-1 text-break">{{ error }}</div>
 </div>
 {% else %}
 <div class="alert alert-info">
-  <strong>Langfuse не настроен.</strong> Задайте в <code>.env</code> переменные
+  <strong>Langfuse не настроен</strong> — сводка ниже работает, а дерево шагов запросов недоступно.
+  Задайте в <code>.env</code> переменные
   <code>LANGFUSE_PUBLIC_KEY</code>, <code>LANGFUSE_SECRET_KEY</code> и <code>LANGFUSE_BASE_URL</code>,
   затем перезапустите web и worker (<code>docker compose up -d web worker</code>).
   Проверка связи: <code>make langfuse-check</code>.

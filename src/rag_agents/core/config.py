@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 1200
     llm_connect_timeout_s: float = 5.0
     llm_read_timeout_s: float = 60.0
+    # Таблица цен LLM (peak/off-peak): cost_usd считаем сами, Langfuse получает готовый cost
+    llm_prices_path: Path = Path("configs/llm_prices.yaml")
 
     upload_dir: Path = Path("/data/uploads")
     max_upload_mb: int = Field(100, ge=1)

@@ -28,6 +28,7 @@ dependencies = [
     "anyio>=4.4",
     "numpy>=2.0",
     "langfuse>=4.15",
+    "pyyaml>=6.0",
 ]
 
 [dependency-groups]
@@ -39,6 +40,7 @@ dev = [
     "respx>=0.21",
     "import-linter>=2.1",
     "celery-types>=0.22",
+    "types-pyyaml>=6.0.12.20260906",
 ]
 
 [project.scripts]

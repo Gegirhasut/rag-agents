@@ -28,7 +28,7 @@
 <div class="usage small text-secondary mt-2">
   {% if u.model != 'none' %}{{ u.provider }}/{{ u.model }}{% if u.reasoning_effort %} · effort={{ u.reasoning_effort }}{% endif %}
   · поиск {{ u.t_retrieval_ms }} мс{% if u.t_first_token_ms %} · первый токен {{ u.t_first_token_ms }} мс{% endif %}
-  · всего {{ u.t_total_ms }} мс · токены {{ u.input_tokens }}→{{ u.output_tokens }}{% if u.reasoning_tokens %} (reasoning {{ u.reasoning_tokens }}){% endif %}{% if u.cached_input_tokens %} · cache {{ u.cached_input_tokens }}{% endif %}
+  · всего {{ u.t_total_ms }} мс · токены {{ u.input_tokens }}→{{ u.output_tokens }}{% if u.reasoning_tokens %} (reasoning {{ u.reasoning_tokens }}){% endif %}{% if u.cached_input_tokens %} · cache {{ u.cached_input_tokens }}{% endif %}{% if u.cost_usd is not none %} · {{ u.cost_usd|usd }}{% if u.cost_peak == false %} (off-peak){% endif %}{% endif %}
   {% else %}поиск {{ u.t_retrieval_ms }} мс · ответ без вызова LLM{% endif %}
 </div>
 {% endif %}

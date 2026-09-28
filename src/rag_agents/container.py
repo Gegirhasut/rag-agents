@@ -17,6 +17,7 @@ from rag_agents.core.langfuse_api import LangfuseReader
 from rag_agents.core.observability import Tracer, build_tracer
 from rag_agents.core.storage import LocalFileStorage
 from rag_agents.llm.openai_compat import OpenAICompatProvider
+from rag_agents.llm.prices import load_prices
 from rag_agents.rag.chunking.naive import NaiveChunker
 from rag_agents.rag.chunking.tokenizer import load_token_counter
 from rag_agents.rag.embeddings.ollama import OllamaEmbedder
@@ -108,6 +109,7 @@ def build_container(
     )
     trace = TraceBus(redis, enabled=settings.trace_enabled)
     tracer = build_tracer(settings)
+    prices = load_prices(settings.llm_prices_path)
     broker = urlsplit(settings.celery_broker_url)
     rabbit_http = httpx.AsyncClient(
         base_url=settings.rabbitmq_management_url,
@@ -134,10 +136,10 @@ def build_container(
         llm=llm,
         agents=AgentService(db, index, settings),
         documents=DocumentService(db, storage, progress, publisher, trace, settings),
-        query=QueryService(db, embedder, index, llm, trace, settings, tracer),
+        query=QueryService(db, embedder, index, llm, trace, settings, tracer, prices),
         trace=trace,
         system=SystemService(db, redis, index, ollama_http, rabbit_http, inspect_active, settings),
         tracer=tracer,
-        insights=InsightsService(LangfuseReader(settings), redis, db),
+        insights=InsightsService(LangfuseReader(settings), redis, db, prices),
         _ingest=ingest,
     )

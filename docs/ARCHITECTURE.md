@@ -271,7 +271,7 @@ sequenceDiagram
 - SDK v4 задаёт атрибуты трейса (`user_id`, `session_id`, `tags`) только через контекстный `propagate_attributes`. Обёртка создаёт **каждый** span внутри короткого `with propagate_attributes(...)`, поэтому атрибуты есть на всех наблюдениях, и агрегаты Langfuse по user и session считаются корректно.
 - `trace_id` детерминирован: `sha256(seed)[:16]` (`Langfuse.create_trace_id(seed=…)`). Для вопроса seed — `query:{message_id}`, для ingest — `ingest:{document_id}:{attempt}`. Трейс находится без поиска, а в итерации 3, когда ingest разойдётся на несколько задач, они смогут писать в общий трейс.
 - Ошибки SDK не ломают сценарий: каждый вызов обёрнут, в лог пишется только warning `langfuse.error`. `end()` идемпотентен.
-- **Стоимость** считает Langfuse по model definition `deepseek-flash` (`make langfuse-model`): usage передаётся ключами `input` (без кэша), `input_cache_read`, `output`. У DeepSeek два тарифа, peak и off-peak (off-peak вдвое дешевле), а Langfuse не умеет цены по времени суток. Поэтому в definition заведены **peak**-цены, и cost в Langfuse — оценка сверху. Точный `cost_usd` по `llm_prices.yaml` с учётом времени — итерация 7 (§12). Тогда он начнёт передаваться в `cost_details` и перекроет расчёт Langfuse. Reasoning-токены DeepSeek уже входят в `completion_tokens`, поэтому пишутся только в metadata, чтобы не посчитать их дважды.
+- **Стоимость считаем сами** (`llm/prices.py`, `configs/llm_prices.yaml`, с 2026-09-28): у DeepSeek тарифы peak (пн–пт 01–04 и 06–10 UTC) и off-peak (вдвое дешевле), а model definition Langfuse цен по времени суток не знает. `cost_usd` и `cost_peak` пишутся в `messages.usage`, а в generation уходят `cost_details` (`input`, `input_cache_read`, `output`, `total`) — они перекрывают расчёт Langfuse, и суммы у нас и в Langfuse совпадают. Model definition `deepseek-flash` (peak-цены, `make langfuse-model`) остаётся запасным вариантом для моделей, которых нет в таблице. Reasoning-токены DeepSeek уже входят в `completion_tokens`, поэтому пишутся только в metadata, чтобы не посчитать их дважды. Китайские праздники (тоже off-peak) не учитываются — в эти дни cost завышен.
 - Клиент Langfuse держит фоновый поток экспорта, поэтому в Celery он создаётся в дочернем процессе (`worker_process_init` → `build_container`), а не в родителе до fork. Flush делают `Container.aclose()` (lifespan uvicorn, `worker_process_shutdown`) и конец каждого ingest.
 - **Чтение трейсов через API:** для организаций, созданных после 16.09.2026, `GET /api/public/traces` отключён (HTTP 410, legacy). Скрипт проверки читает `GET /api/public/v2/observations?traceId=…` и `GET /api/public/v3/scores`.
 
@@ -1194,7 +1194,7 @@ class LLMRouter:
 - **Таймауты httpx:** connect 5 с, read (между чанками) 30 с. Общий дедлайн ответа — 120 с.
 - **Конкурентность:** семафор на провайдера (DeepSeek — 8) в процессе web. Rate limit пользователей — в Redis.
 - **Function calling:** `ToolSpec` → OpenAI `tools` / Anthropic `tools`. Дельты `tool_calls` собираются адаптером, наружу `ToolCall` выходит целиком. Агентный цикл (итерация 8): ≤ 3 шагов `search_sources`, затем финальный ответ стримом.
-- **Учёт стоимости:** таблица цен в конфиге (`llm_prices.yaml`: провайдер, модель, input, cached input, output за 1M), `cost_usd` пишется в `usage` и в Langfuse.
+- **Учёт стоимости:** таблица цен `configs/llm_prices.yaml` (провайдер → модель: input, cached_input, output за 1M; `off_peak_multiplier`, `peak_hours_utc`, `peak_weekdays`), `llm/prices.py::PriceTable.cost()`. `cost_usd` пишется в `usage` и в Langfuse (`cost_details`). **Сделано раньше, 2026-09-28** (понадобилось для страницы «Аналитика», ADR-9); в итерации 7 добавятся цены fallback-провайдеров.
 
 ### 12.3 Reasoning-модели и `LLM_REASONING_EFFORT`
 
@@ -1291,20 +1291,25 @@ Healthchecks у всех хранилищ. `depends_on: condition: service_healt
 
 **Дальше (итерация 4):** rerank и build_context как отдельные span-ы, eval-прогоны в Langfuse Datasets (дублируя PG) для сравнения экспериментов в UI.
 
-### 14.5 Страница «Аналитика» (`/insights`) — Langfuse у нас в UI
-Цель: не ходить в UI Langfuse ради ежедневных вопросов «сколько стоит, как быстро, где тормозит, что ругают». Langfuse — хранилище и глубокий разбор; у нас — сводка и трейс в один клик.
-- **Чтение:** `core/langfuse_api.py::LangfuseReader` (async httpx, Basic auth ключами проекта): `GET /api/public/v2/metrics`, `GET /api/public/v2/observations`, `GET /api/public/projects`. Legacy `GET /traces` не используется (410, ADR-9).
-- **`services/insights.py::InsightsService`:**
-  - `overview(owner, period)` — 9 запросов Metrics API v2 параллельно (семафор 4), кэш в Redis 60 с. KPI (вопросы, стоимость и цена ответа, p50/p95 ответа и TTFT, токены, индексации и ошибки), ряд по часам/дням, агенты (группировка по `tags` = имя агента), «где тратится время» (p50/p95 по имени span-а), модели, последние 30 трейсов;
-  - `trace(owner, trace_id)` — водопад span-ов (смещение и длительность от старта корня, TTFT внутри generation), найденные чанки со score, usage и cost, промпт, вопрос и ответ; кэш 10 мин для завершённых трейсов. Свежий трейс, ещё не обработанный Langfuse, → фрагмент с автоповтором (≤ 10 раз по 3 с);
-  - `session(owner, session_id)` — все трейсы чата или документа.
-- **Изоляция:** каждый запрос к Langfuse фильтруется `userId = owner`; трейс чужого владельца → 404 (и при чтении из кэша). Проект Langfuse общий, поэтому это не формальность, а тот же инвариант, что у PG и Qdrant.
-- **Оценки 👍/👎 — из PG** (`messages.feedback`, `ChatRepository.feedback_stats/feedback_by_trace`), а не из Langfuse: score-ы в Metrics API не несут `userId` и теги трейса, а PG и так источник правды.
-- **Наружу — только выбранные поля:** в metadata наблюдений SDK кладёт служебные ключи (`scope.*`, `resourceAttributes.*`, public key); страница показывает только белый список (`_DETAIL_KEYS`).
-- **Ссылки:** под каждым ответом «🔎 трейс», у документа — «🔎 трейс» (сессия `document-{id}`), у чата — «📊 чат в аналитике», в трейсе — «Langfuse ↗».
-- **Графики:** Chart.js 4 с jsDelivr (без node-сборки), остальное — Bootstrap и CSS-переменные (работает в тёмной теме).
-- Имена span-ов стабильные (`embed_batch`, `upsert_batch`; номер батча — в metadata), иначе агрегаты по имени рассыпаются.
-- Без ключей Langfuse страница показывает подсказку по настройке, ссылки «трейс» скрыты.
+### 14.5 Страница «Аналитика» (`/insights`)
+Цель: не ходить в UI Langfuse ради ежедневных вопросов «сколько стоит, как быстро, где тормозит, что ругают». Сводка у нас, дерево каждого запроса — в один клик.
+
+**Источник сводки — наша PG, а не Metrics API Langfuse.** Первая версия (2026-09-27) строила сводку из Metrics API v2 (9 запросов на обновление) и за ~15 минут исчерпала лимит: на Hobby-тарифе Metrics API — **100 запросов в сутки** (HTTP 429, сброс через 24 ч). Всё нужное для сводки у нас и так есть, и это источник правды:
+- `messages.usage` (`AnswerUsage`): токены, `t_embed_ms`, `t_search_ms`, `t_retrieval_ms`, `t_first_token_ms`, `t_total_ms`, `cost_usd`, `cost_peak`;
+- `messages.feedback` (👍/👎), `messages.status` (ошибки);
+- `documents`: статус, ошибка, `started_at`/`finished_at`, `meta.timings` (мс по шагам ingest: parse, chunk, save_chunks, embed, upsert).
+
+Устройство:
+- `repositories/insights.py::InsightsRepository` — факты периода (`AnswerFact`, `IngestFact`), всегда с фильтром по владельцу (`chats.user_id`, `agents.owner_id`);
+- `services/insights_stats.py::build_overview` — чистая функция: KPI (вопросы, стоимость и цена ответа, p50/p95 ответа и TTFT, токены, индексации и ошибки, доля 👍), ряд по часам/дням, агенты, «где тратится время», модели, последние 30 запросов и индексаций. Перцентили — nearest-rank в Python (масштаб pet-проекта; при росте — `percentile_cont` в SQL);
+- `InsightsService.overview` — кэш в Redis 20 с (сглаживает автообновление раз в минуту). Работает и без Langfuse.
+
+**Langfuse API — только по клику** (`core/langfuse_api.py::LangfuseReader`, `GET /api/public/v2/observations`, `/projects`): дерево span-ов трейса (водопад со смещением и длительностью, TTFT внутри generation, найденные чанки со score, usage, cost, промпт, вопрос и ответ) и список трейсов сессии (чат или `document-{id}` со всеми попытками ingest). Завершённые трейсы кэшируются на 10 мин; свежий, ещё не обработанный трейс → фрагмент с автоповтором (≤ 10 раз по 3 с).
+- **Защита от лимитов:** на 429 `LangfuseRateLimitedError` → ключ в Redis до `retry-after`; до сброса в Langfuse не ходим, страница пишет «Лимит API Langfuse исчерпан до …». Сводка при этом работает.
+- **Изоляция:** запросы к Langfuse фильтруются `userId = owner`, трейс чужого владельца → 404 (и при чтении из кэша).
+- **Наружу — только белый список полей** (`_DETAIL_KEYS`): в metadata наблюдений SDK кладёт служебные ключи (`scope.*`, `resourceAttributes.*`, public key).
+- **Ссылки:** под каждым ответом «🔎 трейс», у документа — «🔎 трейс», у чата — «📊 чат в аналитике», в трейсе — «Langfuse ↗».
+- **Графики:** Chart.js 4 с jsDelivr (без node-сборки), остальное — Bootstrap и CSS-переменные (тёмная тема).
 - **Демо-данные:** `make demo-traffic ROUNDS=2` — два демо-агента, книга + пустой файл (ошибка ingest), вопросы по корпусу, вне корпуса и prompt injection с оценками.
 
 ### 14.3 Метрики — Prometheus-формат (`prometheus_client`)

@@ -10,7 +10,7 @@ import structlog
 from rag_agents.core.config import Settings
 from rag_agents.core.db import Database
 from rag_agents.core.errors import PermanentError, TransientError
-from rag_agents.core.observability import Span, Tracer
+from rag_agents.core.observability import ObservationFields, Span, Tracer
 from rag_agents.domain.agents import AgentOut
 from rag_agents.domain.answers import (
     AnswerUsage,
@@ -26,6 +26,7 @@ from rag_agents.domain.answers import (
 from rag_agents.domain.chats import MessageOut, MessagePair
 from rag_agents.domain.enums import MessageRole, MessageStatus
 from rag_agents.llm.base import LLMError, LLMProvider, LLMRequest, LLMUsage
+from rag_agents.llm.prices import CostBreakdown, PriceTable
 from rag_agents.rag.chunking.naive import normalize_for_index
 from rag_agents.rag.embeddings.ollama import Embedder
 from rag_agents.rag.index.qdrant import QdrantChunkIndex
@@ -59,9 +60,11 @@ class QueryService:
         trace: TraceBus,
         settings: Settings,
         tracer: Tracer,
+        prices: PriceTable,
     ) -> None:
         self.db = db
         self.tracer = tracer
+        self.prices = prices
         self.embedder = embedder
         self.index = index
         self.llm = llm
@@ -205,11 +208,13 @@ class QueryService:
                 "EventSource: SSE-стрим ответа открыт",
                 agent_id=agent.id,
             )
-            chunks = await self._retrieve(agent, question, root)
+            chunks, t_embed, t_search = await self._retrieve(agent, question, root)
             t_retrieval = _ms(t0)
 
             if not chunks:
-                yield DoneEvent(result=await self._refuse(agent, message_id, root, t0))
+                yield DoneEvent(
+                    result=await self._refuse(agent, message_id, root, t0, t_embed, t_search)
+                )
                 return
 
             citations = build_citations(chunks)
@@ -239,14 +244,9 @@ class QueryService:
                     llm_usage = chunk.usage
 
             answer = "".join(parts).strip()
-            usage = AnswerUsage(
-                provider=self.llm.name,
-                model=self.llm.model,
-                reasoning_effort=self.llm.reasoning_effort,
-                t_retrieval_ms=t_retrieval,
-                t_first_token_ms=t_first,
-                t_total_ms=_ms(t0),
-                **llm_usage.model_dump(),
+            cost = self.prices.cost(self.llm.name, self.llm.model, llm_usage, datetime.now(UTC))
+            usage = self._answer_usage(
+                llm_usage, cost, (t_embed, t_search, t_retrieval, t_first, _ms(t0))
             )
             result = QueryResult(
                 answer_md=answer,
@@ -256,17 +256,8 @@ class QueryService:
                 trace_id=root.trace_id if self.tracer.enabled else None,
             )
             await self._save(message_id, MessageStatus.DONE, result, root.trace_id)
-            self._end_generation(generation, root, result, llm_usage, t_first)
-            await self._trace_done(agent.id, usage)
-            log.info(
-                "query.done",
-                message_id=str(message_id),
-                ttft_ms=t_first,
-                total_ms=usage.t_total_ms,
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                reasoning_tokens=usage.reasoning_tokens,
-            )
+            self._end_generation(generation, root, result, llm_usage, t_first, cost)
+            await self._trace_done(agent.id, message_id, usage)
             yield DoneEvent(result=result)
         except (LLMError, TransientError, PermanentError) as e:
             yield await self._fail(e, agent.id, message_id, parts, citations, root, generation)
@@ -351,6 +342,28 @@ class QueryService:
             metadata={"provider": self.llm.name, "prompt_version": PROMPT_VERSION},
         )
 
+    def _answer_usage(
+        self,
+        llm_usage: LLMUsage,
+        cost: CostBreakdown | None,
+        timings: tuple[int, int, int, int | None, int],
+    ) -> AnswerUsage:
+        """timings: (embed, search, retrieval, first_token, total) в мс."""
+        t_embed, t_search, t_retrieval, t_first, t_total = timings
+        return AnswerUsage(
+            provider=self.llm.name,
+            model=self.llm.model,
+            reasoning_effort=self.llm.reasoning_effort,
+            t_embed_ms=t_embed,
+            t_search_ms=t_search,
+            t_retrieval_ms=t_retrieval,
+            t_first_token_ms=t_first,
+            t_total_ms=t_total,
+            cost_usd=cost.total if cost else None,
+            cost_peak=cost.peak if cost else None,
+            **llm_usage.model_dump(),
+        )
+
     def _end_generation(
         self,
         generation: Span,
@@ -358,30 +371,42 @@ class QueryService:
         result: QueryResult,
         llm_usage: LLMUsage,
         t_first: int | None,
+        cost: CostBreakdown | None,
     ) -> None:
-        generation.end(
-            output=result.answer_md,
-            # Ключи совпадают с ценами model definition в Langfuse → он сам считает cost.
-            # reasoning уже входит в output_tokens (DeepSeek), поэтому — только в metadata.
-            usage_details={
+        fields: ObservationFields = {
+            "output": result.answer_md,
+            # reasoning уже входит в output_tokens (DeepSeek), поэтому — только в metadata
+            "usage_details": {
                 "input": llm_usage.input_tokens - llm_usage.cached_input_tokens,
                 "input_cache_read": llm_usage.cached_input_tokens,
                 "output": llm_usage.output_tokens,
             },
-            metadata={
+            "metadata": {
                 "provider": self.llm.name,
                 "prompt_version": PROMPT_VERSION,
                 "reasoning_tokens": llm_usage.reasoning_tokens,
                 "ttft_ms": t_first,
+                "tariff": None if cost is None else ("peak" if cost.peak else "off-peak"),
             },
-        )
+        }
+        if cost is not None:
+            # Свой cost (с учётом peak/off-peak) перекрывает расчёт Langfuse по model definition;
+            # без цены в таблице Langfuse посчитает сам по usage_details
+            fields["cost_details"] = cost.as_langfuse()
+        generation.end(**fields)
         root.end(
             output=result.answer_md,
             metadata={"refused": result.refused, "citations": len(result.citations)},
         )
 
     async def _refuse(
-        self, agent: AgentOut, message_id: UUID, root: Span, t0: float
+        self,
+        agent: AgentOut,
+        message_id: UUID,
+        root: Span,
+        t0: float,
+        t_embed: int,
+        t_search: int,
     ) -> QueryResult:
         """Ничего не найдено: отказ без вызова LLM."""
         t_total = _ms(t0)
@@ -389,6 +414,9 @@ class QueryService:
             provider="none",
             model="none",
             reasoning_effort=None,
+            t_embed_ms=t_embed,
+            t_search_ms=t_search,
+            cost_usd=0.0,
             t_retrieval_ms=t_total,
             t_total_ms=t_total,
         )
@@ -439,7 +467,17 @@ class QueryService:
             agent_id=agent_id,
         )
 
-    async def _trace_done(self, agent_id: UUID, usage: AnswerUsage) -> None:
+    async def _trace_done(self, agent_id: UUID, message_id: UUID, usage: AnswerUsage) -> None:
+        log.info(
+            "query.done",
+            message_id=str(message_id),
+            ttft_ms=usage.t_first_token_ms,
+            total_ms=usage.t_total_ms,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+            cost_usd=usage.cost_usd,
+        )
         await self.trace.emit(
             "query.done",
             "web",
@@ -457,7 +495,9 @@ class QueryService:
             agent_id=agent_id,
         )
 
-    async def _retrieve(self, agent: AgentOut, question: str, root: Span) -> list[RetrievedChunk]:
+    async def _retrieve(
+        self, agent: AgentOut, question: str, root: Span
+    ) -> tuple[list[RetrievedChunk], int, int]:
         """Вопрос → вектор (Ollama) → top-k чанков агента (Qdrant). Каждый шаг — span трейса."""
         emit = self.trace.emit
         collection = await self._collection(agent)
@@ -477,6 +517,7 @@ class QueryService:
         ) as span:
             [vector] = await self.embedder.embed([normalize_for_index(question)])
             span.update(output={"dim": len(vector)})
+        t_embed = _ms(t)
         await emit(
             "query.embedded",
             "ollama",
@@ -522,6 +563,7 @@ class QueryService:
                     "max_score": round(chunks[0].score, 4) if chunks else None,
                 },
             )
+        t_search = _ms(t)
         await emit(
             "query.found",
             "qdrant",
@@ -540,7 +582,7 @@ class QueryService:
                 for c in chunks
             ],
         )
-        return chunks
+        return chunks, t_embed, t_search
 
     async def _collection(self, agent: AgentOut) -> str:
         if agent.active_index_id is None:

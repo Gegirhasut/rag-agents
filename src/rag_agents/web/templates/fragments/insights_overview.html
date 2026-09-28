@@ -2,7 +2,7 @@
 {% set k = o.kpi %}
 <div class="d-flex justify-content-end mb-2">
   <span class="small text-body-secondary">за {{ o.period.label }} · обновлено
-    <time datetime="{{ o.generated_at.isoformat() }}" data-fmt="time"></time> · раз в минуту</span>
+    <time datetime="{{ o.generated_at.isoformat() }}" data-fmt="time"></time> · раз в минуту · источник — наша БД</span>
 </div>
 
 {# ---------- KPI ---------- #}
@@ -162,6 +162,6 @@
     {% endfor %}
     </tbody>
   </table>
-  <div class="card-footer small text-body-secondary">Стоимость считает Langfuse по ценам peak DeepSeek (оценка сверху, ADR-9).</div>
+  <div class="card-footer small text-body-secondary">Стоимость — по <code>configs/llm_prices.yaml</code> с учётом тарифов peak/off-peak DeepSeek; та же сумма уходит в Langfuse.</div>
 </div>
 {% endif %}

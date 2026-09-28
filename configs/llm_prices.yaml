@@ -1,0 +1,19 @@
+# Цены LLM, $ за 1M токенов (ARCHITECTURE §12, ADR-9). Меняются у провайдера — правим здесь.
+# DeepSeek: https://api-docs.deepseek.com/quick_start/pricing (проверено 2026-09-27).
+# Ниже — PEAK-тарифы. Off-peak вдвое дешевле: вне peak_hours_utc и по выходным.
+# Китайские праздники (тоже off-peak) не учитываем: в эти дни cost будет оценкой сверху.
+deepseek:
+  deepseek-flash:
+    input: 0.30
+    cached_input: 0.006
+    output: 1.20
+    off_peak_multiplier: 0.5
+    peak_hours_utc: ["01:00-04:00", "06:00-10:00"]
+    peak_weekdays: [0, 1, 2, 3, 4]   # пн–пт
+  deepseek-v4-pro:
+    input: 1.32
+    cached_input: 0.044
+    output: 3.96
+    off_peak_multiplier: 0.5
+    peak_hours_utc: ["01:00-04:00", "06:00-10:00"]
+    peak_weekdays: [0, 1, 2, 3, 4]

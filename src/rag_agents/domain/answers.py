@@ -45,9 +45,14 @@ class AnswerUsage(BaseModel):
     output_tokens: int = 0
     reasoning_tokens: int = 0
     cached_input_tokens: int = 0
+    t_embed_ms: int | None = None  # None — ответы до появления поля
+    t_search_ms: int | None = None
     t_retrieval_ms: int
     t_first_token_ms: int | None = None
     t_total_ms: int
+    # Стоимость по configs/llm_prices.yaml с учётом тарифа peak/off-peak (None — цены нет)
+    cost_usd: float | None = None
+    cost_peak: bool | None = None
 
 
 class QueryResult(BaseModel):

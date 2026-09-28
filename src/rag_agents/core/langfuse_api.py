@@ -1,12 +1,13 @@
-"""Клиент чтения Langfuse Public API: метрики и наблюдения (для страницы «Аналитика»).
+"""Клиент чтения Langfuse Public API: наблюдения и проект (для страницы «Аналитика»).
 
 Пишем трейсы через SDK (core/observability.py), а читаем — напрямую по HTTP: SDK-клиент API
 синхронный, а страница у нас async. Используются только актуальные эндпоинты:
 `GET /api/public/traces` для организаций после 16.09.2026 отключён (410, ADR-9).
+Metrics API сознательно не используем: на Hobby он ограничен 100 запросами в сутки,
+сводку считаем по своей БД (ARCHITECTURE §14.5).
 """
 
-import json
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -16,6 +17,15 @@ from rag_agents.core.config import Settings
 
 class LangfuseApiError(Exception):
     pass
+
+
+class LangfuseRateLimitedError(LangfuseApiError):
+    """429: лимит Public API исчерпан (у Metrics API на Hobby — 100 запросов в сутки)."""
+
+    def __init__(self, path: str, retry_after_s: int) -> None:
+        super().__init__(f"{path}: rate limited for {retry_after_s} s")
+        self.retry_after_s = retry_after_s
+        self.reset_at = datetime.now(UTC) + timedelta(seconds=retry_after_s)
 
 
 def iso(dt: datetime) -> str:
@@ -46,6 +56,8 @@ class LangfuseReader:
             r = await self._client.get(path, params=params)
         except httpx.HTTPError as e:
             raise LangfuseApiError(f"{path}: {e!r}") from e
+        if r.status_code == httpx.codes.TOO_MANY_REQUESTS:
+            raise LangfuseRateLimitedError(path, int(r.headers.get("retry-after") or 60))
         if r.is_error:
             raise LangfuseApiError(f"{path}: HTTP {r.status_code} {r.text[:200]}")
         return r.json()
@@ -53,12 +65,6 @@ class LangfuseReader:
     async def project_id(self) -> str:
         data = await self._get("/projects", {})
         return str(data["data"][0]["id"])
-
-    async def metrics(self, query: dict[str, Any]) -> list[dict[str, Any]]:
-        """GET /v2/metrics. query — объект запроса Metrics API v2 (view, metrics, filters…)."""
-        data = await self._get("/v2/metrics", {"query": json.dumps(query)})
-        rows: list[dict[str, Any]] = data["data"]
-        return rows
 
     async def observations(self, **params: Any) -> list[dict[str, Any]]:
         """GET /v2/observations: фильтры traceId, userId, sessionId, type, fromStartTime…"""

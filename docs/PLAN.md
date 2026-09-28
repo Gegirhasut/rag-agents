@@ -48,7 +48,8 @@ migrations/  templates/  static/  tests/
 - Трейс ingest: `parse` → `chunk` → `save_chunks` → `embed_upsert` (батчи) → `finalize`, без текстов.
 - 👍/👎 под ответом → `messages.feedback` + score `user_feedback` (миграция `0002`).
 - No-op без ключей и в тестах; flush при остановке web и воркера. Проверка: `make langfuse-check`, `make langfuse-model`, `make langfuse-trace id=…`.
-- Страница «Аналитика» `/insights` (ARCHITECTURE §14.5): KPI, график, агенты, шаги пайплайна, последние трейсы с водопадом span-ов, сессии чатов и документов — данные Langfuse API у нас в UI. Демо-данные: `make demo-traffic`.
+- Страница «Аналитика» `/insights` (ARCHITECTURE §14.5): KPI, график, агенты, шаги пайплайна, последние запросы с водопадом span-ов из Langfuse, сессии чатов и документов. Сводка — из PG (Metrics API Langfuse на Hobby: 100 запросов в сутки). Демо-данные: `make demo-traffic`.
+- Свой расчёт стоимости с тарифами peak/off-peak (`configs/llm_prices.yaml`) — пункт 3 итерации 7, сделан раньше.
 
 **Долг перед итерацией 3:** когда ingest разойдётся на задачи parse и embed, трейс собирается по детерминированному `trace_id` от `document_id`.
 
@@ -201,7 +202,7 @@ reranker/{app.py, export.py}; eval/calibrate.py; configs/rag/thresholds.yaml
 **Задачи**
 1. `AnthropicProvider` (Messages API, stream, tools, `cache_control` на системный блок), `OpenAICompatProvider` для OpenAI и Ollama (на Windows-хосте), общий `LLMChunk` / `ToolCall`.
 2. `LLMRouter`: цепочка из конфига, fallback до первого токена, circuit breaker в Redis, семафоры, обработка context length.
-3. Учёт токенов и стоимости (`llm_prices.yaml`), `cached_input_tokens` для DeepSeek (prefix cache) и Anthropic.
+3. Учёт токенов и стоимости: `llm_prices.yaml` и `cached_input_tokens` для DeepSeek уже есть (мини-итерация 1.5); добавить цены и cache-токены Anthropic/OpenAI.
 4. Кэши: эмбеддинг запроса, retrieval, ответ (ключи §11), инвалидация через `corpus_version`. Эффективный порог отказа входит в `settings_hash`.
 5. Rate limit по токенам в сутки на пользователя (мягкий лимит + сообщение в UI).
 6. Contract-тесты провайдеров на записанных стримах (`respx`, фикстуры SSE-ответов) без сети.

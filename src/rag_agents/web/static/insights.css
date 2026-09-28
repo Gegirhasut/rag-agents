@@ -26,7 +26,7 @@
 .chart-box { position: relative; height: 260px; }
 
 /* «Где тратится время» */
-.stage { display: grid; grid-template-columns: 7.5rem 1fr 4rem; align-items: center; gap: .5rem; font-size: .8rem; margin-bottom: .3rem; }
+.stage { display: grid; grid-template-columns: 10.5rem 1fr 4rem; align-items: center; gap: .5rem; font-size: .8rem; margin-bottom: .3rem; }
 .stage-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--bs-font-monospace); }
 .stage-track { position: relative; height: 10px; background: var(--bs-tertiary-bg); border-radius: 5px; }
 .stage-bar { position: absolute; inset: 0 auto 0 0; border-radius: 5px; min-width: 2px; }

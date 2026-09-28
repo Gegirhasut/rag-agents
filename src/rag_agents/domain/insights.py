@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from rag_agents.domain.answers import AnswerUsage
+
 
 class Period(StrEnum):
     DAY = "24h"
@@ -94,7 +96,7 @@ class ModelStats(BaseModel):
 
 
 class TraceRow(BaseModel):
-    trace_id: str
+    trace_id: str | None  # None — трейсинг был выключен
     name: str
     started_at: datetime
     latency_ms: float | None
@@ -166,3 +168,39 @@ class InsightsOverview(BaseModel):
     models: list[ModelStats]
     recent: list[TraceRow]
     langfuse_project_url: str | None
+
+
+class AnswerFact(BaseModel):
+    """Ответ ассистента из PG — сырьё для сводки «Аналитики»."""
+
+    message_id: UUID
+    chat_id: UUID
+    agent_id: UUID
+    agent_name: str
+    created_at: datetime
+    status: str
+    question: str | None
+    usage: AnswerUsage | None
+    refused: bool | None
+    feedback: int | None
+    trace_id: str | None
+
+
+class IngestFact(BaseModel):
+    document_id: UUID
+    agent_id: UUID
+    agent_name: str
+    filename: str
+    status: str
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    chunks_total: int | None
+    error_message: str | None
+    timings: dict[str, int] = {}  # мс по шагам ingest (documents.meta.timings)
+
+    @property
+    def duration_ms(self) -> float | None:
+        if self.started_at and self.finished_at:
+            return (self.finished_at - self.started_at).total_seconds() * 1000
+        return None

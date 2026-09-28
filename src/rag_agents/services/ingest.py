@@ -26,6 +26,10 @@ from rag_agents.services.trace import TraceBus
 log = structlog.get_logger()
 
 
+def _ms(since: float) -> int:
+    return int((time.monotonic() - since) * 1000)
+
+
 class IngestService:
     """Итерация 1: одна задача на документ (без фан-аута батчей — это итерация 3)."""
 
@@ -141,7 +145,11 @@ class IngestService:
         """parse → chunk → save_chunks → embed_upsert (батчи) → finalize, каждый шаг — span."""
         doc_id = task.document_id
         started = time.monotonic()
-        meta, drafts = await self._parse_and_chunk(doc, agent, root)
+        # Тайминги шагов пишем и в PG (documents.meta.timings): страница «Аналитика» строится
+        # по своей БД, а не по Metrics API Langfuse (100 запросов в сутки на Hobby)
+        timings: dict[str, int] = {}
+        meta, drafts = await self._parse_and_chunk(doc, agent, root, timings)
+        t = time.monotonic()
         ids = [chunk_point_id(doc_id, index.chunking_version, d.ord) for d in drafts]
         with root.child("save_chunks", metadata={"rows": len(drafts)}):
             async with self.db.uow() as uow:
@@ -165,14 +173,16 @@ class IngestService:
             agent_id=agent.id,
         )
 
+        timings["save_chunks_ms"] = _ms(t)
         n_total, embed_ms, upsert_ms = await self._embed_and_upsert(
             doc_id, agent, index, meta, drafts, ids, root
         )
 
         await self.progress.set(doc_id, IngestStage.FINALIZING)
+        timings |= {"embed_ms": embed_ms, "upsert_ms": upsert_ms}
         with root.child("finalize"):
             async with self.db.uow() as uow:
-                await DocumentRepository(uow.session).mark_done(doc_id)
+                await DocumentRepository(uow.session).mark_done(doc_id, timings)
                 await AgentRepository(uow.session).bump_corpus_version(agent.id)
                 await uow.commit()
         await self.trace.emit(
@@ -195,7 +205,7 @@ class IngestService:
         return len(drafts)
 
     async def _parse_and_chunk(
-        self, doc: DocumentOut, agent: AgentOut, root: Span
+        self, doc: DocumentOut, agent: AgentOut, root: Span, timings: dict[str, int]
     ) -> tuple[ParsedMeta, list[ChunkDraft]]:
         doc_id = doc.id
         await self.progress.set(doc_id, IngestStage.PARSING)
@@ -204,12 +214,12 @@ class IngestService:
             meta, sections = TxtParser().parse(self.storage.path(doc.storage_key), doc.filename)
             section_list = list(sections)
             span.update(output={"sections": len(section_list), "has_title": bool(meta.title)})
+        timings["parse_ms"] = _ms(t)
         await self.trace.emit(
             "ingest.parsed",
             "uploads",
             "worker",
-            f"Парсинг txt: кодировка, главы → секций: {len(section_list)} "
-            f"({int((time.monotonic() - t) * 1000)} мс)",
+            f"Парсинг txt: кодировка, главы → секций: {len(section_list)} ({_ms(t)} мс)",
             agent_id=agent.id,
             title=meta.title,
         )
@@ -235,13 +245,14 @@ class IngestService:
                     "max_tokens": max(tokens),
                 }
             )
+        timings["chunk_ms"] = _ms(t)
         await self.trace.emit(
             "ingest.chunked",
             "worker",
             None,
             f"Чанкинг токенизатором bge-m3: чанков {len(drafts)}, "
             f"~{sum(tokens) // len(tokens)} токенов в среднем "
-            f"({int((time.monotonic() - t) * 1000)} мс)",
+            f"({_ms(t)} мс)",
             agent_id=agent.id,
             chunks=len(drafts),
         )

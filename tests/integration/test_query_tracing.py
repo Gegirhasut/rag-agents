@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -13,6 +14,7 @@ from rag_agents.domain.agents import AgentOut, AgentSettings
 from rag_agents.domain.answers import DoneEvent, StreamEvent
 from rag_agents.domain.documents import ChunkPayload
 from rag_agents.llm.base import LLMChunk, LLMRequest, LLMUsage
+from rag_agents.llm.prices import PriceTable
 from rag_agents.rag.index.qdrant import QdrantChunkIndex, chunk_point_id, collection_name
 from rag_agents.repositories.agents import AgentRepository, UserRepository
 from rag_agents.repositories.chats import ChatRepository
@@ -102,6 +104,7 @@ def service(db: Database, qdrant: AsyncQdrantClient, tracer: RecordingTracer) ->
         TraceBus(None, enabled=False),  # type: ignore[arg-type]  # Redis не нужен: шина выключена
         Settings(_env_file=None),  # type: ignore[call-arg]
         tracer,
+        PriceTable.load(Path("configs/llm_prices.yaml")),
     )
 
 
@@ -140,6 +143,13 @@ async def test_question_produces_trace_with_retrieval_and_generation(
     assert gen.fields["model"] == "deepseek-flash"
     assert gen.fields["model_parameters"]["reasoning_effort"] == "low"
     assert gen.fields["usage_details"] == {"input": 60, "input_cache_read": 40, "output": 30}
+    # Свой cost по таблице цен (peak или off-peak — зависит от времени прогона)
+    cost = gen.fields["cost_details"]
+    assert cost["total"] == pytest.approx(cost["input"] + cost["input_cache_read"] + cost["output"])
+    assert cost["total"] in (
+        pytest.approx((60 * 0.30 + 40 * 0.006 + 30 * 1.20) / 1e6),
+        pytest.approx((60 * 0.30 + 40 * 0.006 + 30 * 1.20) / 2e6),
+    )
     assert "completion_start_time" in gen.fields
     assert gen.fields["input"][-1]["role"] == "user"
     assert all(s.ended == 1 for s in tracer.spans)
@@ -148,6 +158,10 @@ async def test_question_produces_trace_with_retrieval_and_generation(
         found = await ChatRepository(s).get_message(agent.id, agent.owner_id, pair.answer.id)
     assert found is not None
     assert found[0].trace_id == root.trace_id
+    assert found[0].usage is not None
+    assert found[0].usage["cost_usd"] == pytest.approx(cost["total"])
+    assert found[0].usage["t_embed_ms"] is not None
+    assert found[0].usage["t_search_ms"] is not None
 
 
 async def test_feedback_is_saved_and_sent_as_score(

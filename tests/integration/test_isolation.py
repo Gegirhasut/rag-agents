@@ -1,6 +1,7 @@
 """Изоляция данных агентов (SPEC NFR «Изоляция»): ни один путь чтения не видит чужое."""
 
 import hashlib
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -14,6 +15,7 @@ from rag_agents.rag.index.qdrant import QdrantChunkIndex, chunk_point_id, collec
 from rag_agents.repositories.agents import AgentRepository, UserRepository
 from rag_agents.repositories.chats import ChatRepository
 from rag_agents.repositories.documents import DocumentRepository
+from rag_agents.repositories.insights import InsightsRepository
 
 pytestmark = pytest.mark.integration
 DIM = 4
@@ -215,3 +217,42 @@ async def test_claim_is_single_winner(db: Database) -> None:
             wins.append(await DocumentRepository(uow.session).claim(doc.id))
             await uow.commit()
     assert wins == [True, False]
+
+
+async def test_insights_facts_are_scoped_to_owner(db: Database) -> None:
+    """Сводка «Аналитики» строится по PG: чужие ответы и документы в неё не попадают."""
+    alice = await _agent(db, f"ins-a-{uuid4().hex[:6]}@t")
+    bob = await _agent(db, f"ins-b-{uuid4().hex[:6]}@t")
+    since = datetime.now(UTC) - timedelta(minutes=5)
+    async with db.uow() as uow:
+        chats = ChatRepository(uow.session)
+        chat = await chats.create_chat(alice.id, alice.owner_id, "q")
+        msg = await chats.add_message(chat.id, MessageRole.ASSISTANT, MessageStatus.PENDING)
+        await chats.finish_message(
+            msg.id,
+            status=MessageStatus.DONE,
+            content="ответ",
+            usage={"provider": "deepseek", "model": "deepseek-flash", "reasoning_effort": None,
+                   "t_retrieval_ms": 100, "t_total_ms": 900, "cost_usd": 0.001},
+        )  # fmt: skip
+        docs = DocumentRepository(uow.session)
+        doc, _ = await docs.insert_if_new(
+            document_id=uuid4(),
+            agent_id=alice.id,
+            filename="a.txt",
+            fmt="txt",
+            size_bytes=1,
+            sha256=hashlib.sha256(uuid4().bytes).digest(),
+            storage_key="k",
+        )
+        await docs.mark_done(doc.id, {"parse_ms": 12, "embed_ms": 3400})
+        await uow.commit()
+
+    async with db.session() as s:
+        repo = InsightsRepository(s)
+        [a] = await repo.answers(alice.owner_id, since)
+        assert (a.agent_id, a.usage.cost_usd if a.usage else None) == (alice.id, 0.001)
+        [d] = await repo.documents(alice.owner_id, since)
+        assert d.timings == {"parse_ms": 12, "embed_ms": 3400}
+        assert await repo.answers(bob.owner_id, since) == []
+        assert await repo.documents(bob.owner_id, since) == []

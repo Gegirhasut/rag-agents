@@ -1,65 +1,31 @@
 """InsightsService на записанных ответах Langfuse API: без сети, БД и Redis."""
 
 import json
-from datetime import datetime
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, ClassVar
 from uuid import UUID, uuid4
 
 import pytest
 
 from rag_agents.core.config import Settings
-from rag_agents.core.langfuse_api import LangfuseReader
-from rag_agents.domain.chats import FeedbackStat
-from rag_agents.domain.insights import Period
+from rag_agents.core.langfuse_api import LangfuseRateLimitedError, LangfuseReader
+from rag_agents.domain.answers import AnswerUsage
+from rag_agents.domain.insights import AnswerFact, IngestFact, Period
+from rag_agents.llm.prices import PriceTable
 from rag_agents.services.errors import NotFoundError
-from rag_agents.services.insights import InsightsDisabledError, InsightsService
+from rag_agents.services.insights import (
+    InsightsDisabledError,
+    InsightsService,
+    InsightsUnavailableError,
+)
+from rag_agents.services.insights_stats import build_overview, percentile
 from rag_agents.web.templating import templates
 
 OWNER = uuid4()
 AGENT_ID = uuid4()
 TRACE = "a" * 32
-
-
-# Ответы Metrics API v2 по виду запроса (числа — то строкой, то числом, как в реальном API)
-METRICS: dict[str, list[dict[str, Any]]] = {
-    "series": [
-        {"time_dimension": "2026-09-27T18:00:00Z", "count_count": "3", "sum_totalCost": 0.004,
-         "p50_timeToFirstToken": 1500},
-        {"time_dimension": "2026-09-27T19:00:00Z", "count_count": "0", "sum_totalCost": None,
-         "p50_timeToFirstToken": None},
-    ],
-    "errors": [{"traceName": "ingest", "count_count": "1"}],
-    "traceName": [
-        {"traceName": "query", "count_count": "4", "p50_latency": 5000, "p95_latency": 9000},
-        {"traceName": "ingest", "count_count": "2", "p50_latency": 20000,
-         "p95_latency": 30000},
-    ],
-    "tags": [
-        {"tags": ["Толстой"], "count_count": "4", "sum_totalCost": 0.006,
-         "sum_totalTokens": 9000, "p50_timeToFirstToken": 1400,
-         "p50_latency": 5000, "p95_latency": 9000},
-        {"tags": ["Удалённый", "ingest"], "count_count": "1", "sum_totalCost": 0,
-         "sum_totalTokens": 0, "p50_latency": 100, "p95_latency": 100},
-    ],
-    "traceName-name": [
-        {"traceName": "query", "name": "llm_generate", "count_count": "4",
-         "p50_latency": 4500, "p95_latency": 8000},
-        {"traceName": "query", "name": "embed_query", "count_count": "4",
-         "p50_latency": 150, "p95_latency": 300},
-        {"traceName": "ingest", "name": "embed_batch 1/6", "count_count": "1",
-         "p50_latency": 20000, "p95_latency": 20000},
-        {"traceName": "connectivity-check", "name": "ping", "count_count": "1",
-         "p50_latency": 1, "p95_latency": 1},
-    ],
-    "providedModelName": [
-        {"providedModelName": "deepseek-flash", "count_count": "4", "sum_totalCost": 0.006,
-         "sum_inputTokens": "8000", "sum_outputTokens": 1000},
-    ],
-    "totals": [
-        {"count_count": "4", "sum_totalCost": 0.006, "sum_inputTokens": "8000",
-         "sum_outputTokens": 1000, "p50_timeToFirstToken": 1400, "p95_timeToFirstToken": 2600},
-    ],
-}  # fmt: skip
+PRICES = PriceTable.load(Path("configs/llm_prices.yaml"))
 
 
 class FakeRedis:
@@ -79,27 +45,19 @@ class FakeReader:
     enabled = True
     base_url = "https://cloud.langfuse.com"
 
-    def __init__(self, trace_owner: UUID = OWNER) -> None:
-        self.metric_queries: list[dict[str, Any]] = []
+    def __init__(self, trace_owner: UUID = OWNER, rate_limited: bool = False) -> None:
+        self.rate_limited = rate_limited
+        self.calls = 0
         self.observation_calls: list[dict[str, Any]] = []
         self.trace_owner = trace_owner
 
     async def project_id(self) -> str:
         return "proj1"
 
-    async def metrics(self, query: dict[str, Any]) -> list[dict[str, Any]]:
-        self.metric_queries.append(query)
-        dims = tuple(d["field"] for d in query["dimensions"])
-        filters = {f["column"]: f["value"] for f in query["filters"]}
-        if "timeDimension" in query:
-            key = "series"
-        elif dims == ("traceName",) and filters.get("level") == "ERROR":
-            key = "errors"
-        else:
-            key = "-".join(dims) or "totals"
-        return METRICS[key]
-
     async def observations(self, **params: Any) -> list[dict[str, Any]]:
+        self.calls += 1
+        if self.rate_limited:
+            raise LangfuseRateLimitedError("/v2/observations", 3600)
         self.observation_calls.append(params)
         if params.get("traceId"):
             return self._trace()
@@ -141,63 +99,152 @@ class FakeReader:
 
 
 class Service(InsightsService):
-    """PG подменён: агенты и оценки берутся из памяти."""
+    """PG подменён: факты и оценки — из памяти."""
 
-    async def _agent_ids(self, owner_id: UUID) -> dict[str, UUID]:
-        return {"Толстой": AGENT_ID}
+    answers: ClassVar[list[AnswerFact]] = []
+    docs: ClassVar[list[IngestFact]] = []
 
-    async def _feedback_stats(self, owner_id: UUID, since: datetime) -> list[FeedbackStat]:
-        return [FeedbackStat(agent_id=AGENT_ID, up=3, down=1)]
+    async def _facts(
+        self, owner_id: UUID, since: datetime
+    ) -> tuple[list[AnswerFact], list[IngestFact]]:
+        return (self.answers, self.docs) if owner_id == OWNER else ([], [])
 
     async def _feedback_by_trace(self, owner_id: UUID, trace_ids: list[str]) -> dict[str, int]:
         return {TRACE: 1} if owner_id == OWNER else {}
 
 
 def service(reader: FakeReader | None = None) -> Service:
-    return Service(reader or FakeReader(), FakeRedis(), None)  # type: ignore[arg-type]
+    return Service(reader or FakeReader(), FakeRedis(), None, PRICES)  # type: ignore[arg-type]
 
 
-async def test_overview_filters_every_query_by_owner_and_parses_numbers() -> None:
-    reader = FakeReader()
-    o = await service(reader).overview(OWNER, Period.DAY)
+NOW = datetime(2026, 9, 28, 12, 30, tzinfo=UTC)  # пн, off-peak
 
-    owner_filter = {"column": "userId", "operator": "=", "value": str(OWNER), "type": "string"}
-    assert reader.metric_queries
-    assert all(owner_filter in q["filters"] for q in reader.metric_queries)
-    assert all(c.get("userId") == str(OWNER) for c in reader.observation_calls)
 
+def usage(total: int, ttft: int | None, *, cost: float | None = None, **kw: Any) -> AnswerUsage:
+    return AnswerUsage(
+        provider=kw.get("provider", "deepseek"),
+        model=kw.get("model", "deepseek-flash"),
+        reasoning_effort="low",
+        input_tokens=kw.get("input_tokens", 2000),
+        cached_input_tokens=kw.get("cached", 0),
+        output_tokens=kw.get("output_tokens", 500),
+        t_embed_ms=kw.get("embed", 150),
+        t_search_ms=kw.get("search", 40),
+        t_retrieval_ms=kw.get("retrieval", 200),
+        t_first_token_ms=ttft,
+        t_total_ms=total,
+        cost_usd=cost,
+    )
+
+
+def answer(
+    minutes_ago: int, u: AnswerUsage | None, *, agent: str = "Толстой", **kw: Any
+) -> AnswerFact:
+    return AnswerFact(
+        message_id=uuid4(),
+        chat_id=kw.get("chat_id", uuid4()),
+        agent_id=AGENT_ID if agent == "Толстой" else OTHER_AGENT,
+        agent_name=agent,
+        created_at=NOW - timedelta(minutes=minutes_ago),
+        status=kw.get("status", "done"),
+        question=kw.get("question", "Вопрос?"),
+        usage=u,
+        refused=False,
+        feedback=kw.get("feedback"),
+        trace_id=kw.get("trace_id"),
+    )
+
+
+OTHER_AGENT = uuid4()
+ANSWERS = [
+    answer(5, usage(4000, 1000, cost=0.002), feedback=1, trace_id=TRACE, question="Смысл?"),
+    answer(10, usage(6000, 2000, cost=0.004), feedback=-1),
+    # старый ответ без cost_usd — пересчитывается по таблице цен (off-peak)
+    answer(70, usage(8000, 3000, input_tokens=1_000_000, output_tokens=0, cached=0)),
+    answer(80, usage(1000, None, provider="none", model="none"), agent="Другой"),
+    answer(90, None, status="error"),
+]
+DOCS = [
+    IngestFact(
+        document_id=uuid4(), agent_id=AGENT_ID, agent_name="Толстой", filename="book.txt",
+        status="done", created_at=NOW - timedelta(minutes=30),
+        started_at=NOW - timedelta(minutes=30), finished_at=NOW - timedelta(minutes=29),
+        chunks_total=161, error_message=None,
+        timings={"parse_ms": 100, "chunk_ms": 900, "save_chunks_ms": 300, "embed_ms": 30000,
+                 "upsert_ms": 800},
+    ),
+    IngestFact(
+        document_id=uuid4(), agent_id=AGENT_ID, agent_name="Толстой", filename="пустой.txt",
+        status="failed", created_at=NOW - timedelta(minutes=31), started_at=None,
+        finished_at=None, chunks_total=None, error_message="Файл пустой",
+    ),
+]  # fmt: skip
+
+
+def test_percentile_is_nearest_rank() -> None:
+    assert percentile([], 50) is None
+    assert percentile([5], 95) == 5
+    assert percentile([1, 2, 3, 4], 50) == 2
+    assert percentile(range(1, 101), 95) == 95
+
+
+def test_overview_from_pg_facts() -> None:
+    o = build_overview(Period.DAY, NOW, ANSWERS, DOCS, PRICES, "https://lf/project/p")
     k = o.kpi
-    assert (k.questions, k.ingests, k.errors, k.llm_calls) == (4, 2, 1, 4)
-    assert k.cost_usd == pytest.approx(0.006)
-    assert k.cost_per_question == pytest.approx(0.0015)
-    assert (k.feedback_up, k.feedback_down) == (3, 1)
-    assert o.series[0].questions == 3
-    assert o.series[1].cost_usd == 0.0
+    assert (k.questions, k.llm_calls, k.ingests, k.errors) == (5, 3, 2, 2)
+    # 0.002 + 0.004 + 1M входных токенов off-peak (0.30 / 2) + отказ без LLM (0)
+    assert k.cost_usd == pytest.approx(0.006 + 0.15)
+    assert k.cost_per_question == pytest.approx(0.156 / 3)
+    assert (k.feedback_up, k.feedback_down) == (1, 1)
+    assert k.ttft_p50_ms == 2000
+    assert k.latency_p95_ms == 8000
 
-    [tolstoy, deleted] = o.agents
+    assert len(o.series) == 25  # 24 часа + текущий
+    assert sum(p.questions for p in o.series) == 5
+
+    tolstoy, other = o.agents
     assert (tolstoy.name, tolstoy.agent_id, tolstoy.questions) == ("Толстой", AGENT_ID, 4)
-    assert tolstoy.feedback_up_rate == 0.75
-    assert (deleted.name, deleted.agent_id) == ("Удалённый", None)  # тег "ingest" — не агент
+    assert tolstoy.feedback_up_rate == 0.5
+    assert (other.name, other.cost_usd) == ("Другой", 0.0)
 
-    names = [(s.trace_name, s.name) for s in o.stages]
-    assert names == [("query", "llm_generate"), ("query", "embed_query")]
-    assert o.models[0].model == "deepseek-flash"
-    assert o.langfuse_project_url == "https://cloud.langfuse.com/project/proj1"
+    stages = {(s.trace_name, s.name): s for s in o.stages}
+    assert stages[("query", "embed_query")].p50_ms == 150
+    assert stages[("query", "llm: до первого токена")].p50_ms == 1800  # 2000 − 200 поиск
+    assert stages[("query", "llm: генерация ответа")].count == 3
+    assert stages[("ingest", "embed")].p50_ms == 30000
+    assert [m.model for m in o.models] == ["deepseek/deepseek-flash"]
 
-    query_row, ingest_row = o.recent
-    assert query_row.title == "В чём смысл жизни?"
-    assert (query_row.cost_usd, query_row.tokens, query_row.feedback) == (0.0016, 2700, True)
-    assert query_row.ttft_ms == pytest.approx(1600)
-    assert (ingest_row.title, ingest_row.level) == ("пустой.txt", "ERROR")
+    first = o.recent[0]
+    assert (first.title, first.trace_id, first.feedback, first.cost_usd) == (
+        "Смысл?", TRACE, True, 0.002,
+    )  # fmt: skip
+    failed = next(r for r in o.recent if r.name == "ingest" and r.level == "ERROR")
+    assert failed.status_message == "Файл пустой"
+    assert failed.session_id is not None
+    assert failed.session_id.startswith("document-")
+    assert o.langfuse_project_url == "https://lf/project/p"
 
 
-async def test_overview_is_cached() -> None:
+async def test_overview_uses_only_own_facts_and_no_langfuse_metrics() -> None:
     reader = FakeReader()
+    Service.answers, Service.docs = ANSWERS, DOCS
     svc = service(reader)
-    await svc.overview(OWNER, Period.WEEK)
-    n = len(reader.metric_queries)
-    await svc.overview(OWNER, Period.WEEK)
-    assert len(reader.metric_queries) == n
+    own = await svc.overview(OWNER, Period.WEEK)
+    assert own.kpi.questions == 5
+    assert reader.calls == 0  # сводка не ходит в Langfuse (кроме id проекта для ссылки)
+    foreign = await svc.overview(uuid4(), Period.WEEK)
+    assert foreign.kpi.questions == 0
+
+
+async def test_rate_limit_blocks_further_calls_until_reset() -> None:
+    reader = FakeReader(rate_limited=True)
+    svc = service(reader)
+    with pytest.raises(InsightsUnavailableError, match="Лимит API Langfuse"):
+        await svc.trace(OWNER, TRACE)
+    assert reader.calls == 1
+    with pytest.raises(InsightsUnavailableError, match="Лимит API Langfuse"):
+        await svc.trace(OWNER, TRACE)
+    assert reader.calls == 1  # второй раз в Langfuse не пошли
 
 
 async def test_trace_detail_tree_hits_prompt_and_no_sdk_metadata() -> None:
@@ -239,23 +286,23 @@ async def test_invalid_trace_id_is_not_found() -> None:
 
 async def test_disabled_without_keys() -> None:
     reader = LangfuseReader(Settings(_env_file=None, app_env="dev"))
-    svc = InsightsService(reader, FakeRedis(), None)  # type: ignore[arg-type]
+    svc = InsightsService(reader, FakeRedis(), None, PRICES)  # type: ignore[arg-type]
     assert not svc.enabled
     assert await svc.project_url() is None
     with pytest.raises(InsightsDisabledError):
-        await svc.overview(OWNER, Period.DAY)
+        await svc.trace(OWNER, TRACE)
     await reader.aclose()
 
 
 async def test_templates_render_overview_and_trace() -> None:
     svc = service()
-    overview = await svc.overview(OWNER, Period.DAY)
+    overview = build_overview(Period.DAY, NOW, ANSWERS, DOCS, PRICES, None)
     trace = await svc.trace(OWNER, TRACE)
     templates.env.globals["insights_enabled"] = True
     html = templates.get_template("fragments/insights_overview.html").render(o=overview)
     assert "Толстой" in html
     assert "series-data" in html
-    assert "llm_generate" in html
+    assert "до первого токена" in html
     html = templates.get_template("fragments/insights_trace.html").render(t=trace, trace_id=TRACE)
     assert "qdrant_search" in html
     assert "0.610" in html

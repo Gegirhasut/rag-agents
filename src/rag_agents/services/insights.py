@@ -8,7 +8,7 @@
 import asyncio
 import json
 import re
-from collections.abc import Awaitable
+from collections.abc import Coroutine
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -17,28 +17,27 @@ import structlog
 from redis.asyncio import Redis
 
 from rag_agents.core.db import Database
-from rag_agents.core.langfuse_api import LangfuseApiError, LangfuseReader, iso
-from rag_agents.domain.chats import FeedbackStat
+from rag_agents.core.langfuse_api import LangfuseApiError, LangfuseRateLimitedError, LangfuseReader
 from rag_agents.domain.insights import (
-    AgentStats,
+    AnswerFact,
+    IngestFact,
     InsightsOverview,
-    Kpi,
-    ModelStats,
     Period,
     SearchHit,
     SpanRow,
-    StageStats,
-    TimePoint,
     TraceDetail,
     TraceRow,
 )
-from rag_agents.repositories.agents import AgentRepository
+from rag_agents.llm.prices import PriceTable
 from rag_agents.repositories.chats import ChatRepository
+from rag_agents.repositories.insights import InsightsRepository
 from rag_agents.services.errors import NotFoundError
+from rag_agents.services.insights_stats import build_overview
 
 log = structlog.get_logger()
 
-OVERVIEW_TTL_S = 60
+OVERVIEW_TTL_S = 20  # PG: дёшево, кэш только сглаживает автообновление
+RATE_LIMIT_KEY = "insights:langfuse_rate_limited_until"
 TRACE_TTL_S = 600
 PROJECT_TTL_S = 24 * 3600
 RECENT_LIMIT = 30
@@ -131,21 +130,34 @@ def _short(v: Any, limit: int = 120) -> str:
 
 
 class InsightsService:
-    def __init__(self, reader: LangfuseReader, redis: Redis, db: Database) -> None:
+    def __init__(
+        self, reader: LangfuseReader, redis: Redis, db: Database, prices: PriceTable
+    ) -> None:
         self.reader = reader
         self.redis = redis
         self.db = db
-        # Metrics API на бесплатном тарифе ограничен по частоте: не больше 4 запросов разом
+        self.prices = prices
+        # Бережём лимиты Public API Langfuse: не больше 4 запросов разом
         self._sem = asyncio.Semaphore(4)
 
     @property
     def enabled(self) -> bool:
         return self.reader.enabled
 
-    async def _call[T](self, aw: Awaitable[T]) -> T:
+    async def _call[T](self, aw: Coroutine[Any, Any, T]) -> T:
+        """Вызов Langfuse API. После 429 не ходим туда до сброса лимита (ключ в Redis)."""
+        blocked = await self.redis.get(RATE_LIMIT_KEY)
+        if isinstance(blocked, str):
+            aw.close()  # корутина не будет выполнена — закрываем, чтобы не было warning
+            raise InsightsUnavailableError(f"Лимит API Langfuse исчерпан до {blocked} UTC")
         async with self._sem:
             try:
                 return await aw
+            except LangfuseRateLimitedError as e:
+                until = e.reset_at.strftime("%d.%m %H:%M")
+                await self.redis.set(RATE_LIMIT_KEY, until, ex=max(e.retry_after_s, 1))
+                log.warning("insights.langfuse_rate_limited", until=until)
+                raise InsightsUnavailableError(f"Лимит API Langfuse исчерпан до {until} UTC") from e
             except LangfuseApiError as e:
                 log.warning("insights.langfuse_error", error=str(e))
                 raise InsightsUnavailableError(str(e)) from e
@@ -167,218 +179,26 @@ class InsightsService:
             await self.redis.set(key, pid, ex=PROJECT_TTL_S)
         return f"{self.reader.base_url}/project/{pid}"
 
-    # ---------- обзор ----------
+    # ---------- обзор (из PG) ----------
 
     async def overview(self, owner_id: UUID, period: Period) -> InsightsOverview:
-        if not self.enabled:
-            raise InsightsDisabledError
+        """Сводка по своей БД: без лимитов API и работает даже без Langfuse."""
         key = f"insights:overview:{owner_id}:{period.value}"
         cached = await self.redis.get(key)
         if cached:
             return InsightsOverview.model_validate_json(cached)
-        result = await self._build_overview(owner_id, period)
+        now = datetime.now(UTC)
+        answers, docs = await self._facts(owner_id, now - period.delta)
+        result = build_overview(period, now, answers, docs, self.prices, await self.project_url())
         await self.redis.set(key, result.model_dump_json(), ex=OVERVIEW_TTL_S)
         return result
 
-    async def _build_overview(self, owner_id: UUID, period: Period) -> InsightsOverview:
-        now = datetime.now(UTC)
-        since = now - period.delta
-        owner = {"column": "userId", "operator": "=", "value": str(owner_id), "type": "string"}
-        root = {"column": "isRootObservation", "operator": "=", "value": True, "type": "boolean"}
-        not_root = {**root, "value": False}
-        gen = {"column": "type", "operator": "=", "value": "GENERATION", "type": "string"}
-        query_trace = {"column": "traceName", "operator": "=", "value": "query", "type": "string"}
-        errors = {"column": "level", "operator": "=", "value": "ERROR", "type": "string"}
-
-        def q(
-            view: str,
-            metrics: list[tuple[str, str]],
-            filters: list[dict[str, Any]],
-            dims: tuple[str, ...] = (),
-            time: bool = False,
-        ) -> Awaitable[list[dict[str, Any]]]:
-            body: dict[str, Any] = {
-                "view": view,
-                "metrics": [{"measure": m, "aggregation": a} for m, a in metrics],
-                "dimensions": [{"field": d} for d in dims],
-                "filters": [owner, *filters],
-                "fromTimestamp": iso(since),
-                "toTimestamp": iso(now),
-                "config": {"row_limit": 200},
-            }
-            if time:
-                body["timeDimension"] = {"granularity": period.granularity}
-            return self._call(self.reader.metrics(body))
-
-        latency = [("count", "count"), ("latency", "p50"), ("latency", "p95")]
-        gen_metrics = [
-            ("count", "count"),
-            ("totalCost", "sum"),
-            ("inputTokens", "sum"),
-            ("outputTokens", "sum"),
-            ("timeToFirstToken", "p50"),
-            ("timeToFirstToken", "p95"),
-        ]
-        metric_rows, recent = await asyncio.gather(
-            asyncio.gather(
-                q("observations", latency, [root], ("traceName",)),
-                q("observations", [("count", "count")], [root, errors], ("traceName",)),
-                q("observations", gen_metrics, [gen]),
-                q(
-                    "observations",
-                    [("count", "count"), ("totalCost", "sum"), ("timeToFirstToken", "p50")],
-                    [gen],
-                    time=True,
-                ),
-                q(
-                    "observations",
-                    [
-                        ("count", "count"),
-                        ("totalCost", "sum"),
-                        ("totalTokens", "sum"),
-                        ("timeToFirstToken", "p50"),
-                    ],
-                    [gen],
-                    ("tags",),
-                ),
-                q("observations", latency, [root, query_trace], ("tags",)),
-                q("observations", latency, [not_root], ("traceName", "name")),
-                q(
-                    "observations",
-                    [
-                        ("count", "count"),
-                        ("totalCost", "sum"),
-                        ("inputTokens", "sum"),
-                        ("outputTokens", "sum"),
-                    ],
-                    [gen],
-                    ("providedModelName",),
-                ),
-            ),
-            self._recent(owner_id, since),
-        )
-        (
-            roots,
-            root_errors,
-            gens,
-            series,
-            by_tag_gen,
-            by_tag_root,
-            stages,
-            models,
-        ) = metric_rows
-
-        by_name = {r["traceName"]: r for r in roots}
-        err_by_name = {r["traceName"]: _i(r["count_count"]) for r in root_errors}
-        g = gens[0] if gens else {}
-        # Оценки — из PG (messages.feedback): score-ы Langfuse не связаны с userId и тегами трейса,
-        # а наша БД и так источник правды и изолирует данные по владельцу
-        feedback = await self._feedback_stats(owner_id, since)
-        up, down = sum(f.up for f in feedback), sum(f.down for f in feedback)
-        query_row = by_name.get("query", {})
-        kpi = Kpi(
-            questions=_i(query_row.get("count_count")),
-            llm_calls=_i(g.get("count_count")),
-            ingests=_i(by_name.get("ingest", {}).get("count_count")),
-            errors=sum(err_by_name.values()),
-            cost_usd=_f(g.get("sum_totalCost")) or 0.0,
-            input_tokens=_i(g.get("sum_inputTokens")),
-            output_tokens=_i(g.get("sum_outputTokens")),
-            latency_p50_ms=_f(query_row.get("p50_latency")),
-            latency_p95_ms=_f(query_row.get("p95_latency")),
-            ttft_p50_ms=_f(g.get("p50_timeToFirstToken")),
-            ttft_p95_ms=_f(g.get("p95_timeToFirstToken")),
-            feedback_count=up + down,
-            feedback_up_rate=up / (up + down) if up + down else None,
-        )
-        return InsightsOverview(
-            period=period,
-            generated_at=now,
-            kpi=kpi,
-            series=[
-                TimePoint(
-                    ts=_dt(r["time_dimension"]),
-                    questions=_i(r.get("count_count")),
-                    cost_usd=_f(r.get("sum_totalCost")) or 0.0,
-                    ttft_p50_ms=_f(r.get("p50_timeToFirstToken")),
-                )
-                for r in series
-            ],
-            agents=await self._agents(owner_id, by_tag_gen, by_tag_root, feedback),
-            stages=sorted(
-                (
-                    StageStats(
-                        trace_name=r["traceName"],
-                        name=r["name"],
-                        count=_i(r["count_count"]),
-                        p50_ms=_f(r.get("p50_latency")),
-                        p95_ms=_f(r.get("p95_latency")),
-                    )
-                    for r in stages
-                    if r.get("traceName") in {"query", "ingest"}
-                    and not _NUMBERED.search(r.get("name") or "")
-                ),
-                key=lambda s: (s.trace_name != "query", -(s.p50_ms or 0)),
-            ),
-            models=[
-                ModelStats(
-                    model=r.get("providedModelName") or "—",
-                    calls=_i(r["count_count"]),
-                    cost_usd=_f(r.get("sum_totalCost")) or 0.0,
-                    input_tokens=_i(r.get("sum_inputTokens")),
-                    output_tokens=_i(r.get("sum_outputTokens")),
-                )
-                for r in models
-            ],
-            recent=recent,
-            langfuse_project_url=await self.project_url(),
-        )
-
-    async def _agents(
-        self,
-        owner_id: UUID,
-        gen: list[dict[str, Any]],
-        roots: list[dict[str, Any]],
-        feedback: list[FeedbackStat],
-    ) -> list[AgentStats]:
-        """Строки Metrics API сгруппированы по tags (имя агента) — сводим в одну таблицу."""
-        ids = await self._agent_ids(owner_id)
-        stats: dict[str, AgentStats] = {}
-
-        def row(tags: list[str] | None) -> AgentStats | None:
-            name = _agent_tag(tags)
-            if name is None:
-                return None
-            return stats.setdefault(name, AgentStats(name=name, agent_id=ids.get(name)))
-
-        for r in gen:
-            if a := row(r.get("tags")):
-                a.cost_usd = _f(r.get("sum_totalCost")) or 0.0
-                a.tokens = _i(r.get("sum_totalTokens"))
-                a.ttft_p50_ms = _f(r.get("p50_timeToFirstToken"))
-        for r in roots:
-            if a := row(r.get("tags")):
-                a.questions = _i(r.get("count_count"))
-                a.latency_p50_ms = _f(r.get("p50_latency"))
-                a.latency_p95_ms = _f(r.get("p95_latency"))
-        names = {agent_id: name for name, agent_id in ids.items()}
-        for f in feedback:
-            name = names.get(f.agent_id)
-            if name is not None and f.up + f.down:
-                a = stats.setdefault(name, AgentStats(name=name, agent_id=f.agent_id))
-                a.feedback_count = f.up + f.down
-                a.feedback_up_rate = f.up / a.feedback_count
-        return sorted(stats.values(), key=lambda a: (-a.questions, a.name))
-
-    async def _agent_ids(self, owner_id: UUID) -> dict[str, UUID]:
-        """Имя агента (тег трейса) → id, чтобы из таблицы вести на страницу агента."""
+    async def _facts(
+        self, owner_id: UUID, since: datetime
+    ) -> tuple[list[AnswerFact], list[IngestFact]]:
         async with self.db.session() as s:
-            items = await AgentRepository(s).list_for_owner(owner_id)
-        return {i.agent.name: i.agent.id for i in items}
-
-    async def _feedback_stats(self, owner_id: UUID, since: datetime) -> list[FeedbackStat]:
-        async with self.db.session() as s:
-            return await ChatRepository(s).feedback_stats(owner_id, since)
+            repo = InsightsRepository(s)
+            return await repo.answers(owner_id, since), await repo.documents(owner_id, since)
 
     async def _feedback_by_trace(self, owner_id: UUID, trace_ids: list[str]) -> dict[str, int]:
         async with self.db.session() as s:
