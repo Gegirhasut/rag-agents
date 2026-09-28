@@ -150,8 +150,8 @@ NODES: list[Tech] = [
     ),
     Tech(
         id="worker",
-        title="worker",
-        subtitle="Celery 5 · prefork ×2",
+        title="workers",
+        subtitle="Celery 5 · ingest ×2 · embed ×2 · beat",
         group="app",
         what=(
             "Celery — фреймворк фоновых задач: забирает сообщения из RabbitMQ и выполняет "
@@ -161,10 +161,21 @@ NODES: list[Tech] = [
         ),
         laravel="php artisan queue:work + Job-классы; Flower ≈ Horizon.",
         in_project=[
-            "Индексация книги: парсинг → чанкинг → эмбеддинги батчами → upsert в Qdrant",
+            "worker-ingest (очередь ingest.parse): парсинг 5 форматов → структурный чанкинг → "
+            "чанки в PG → фан-аут задач эмбеддинга по батчам",
+            "worker-embed (ingest.embed): батч → Ollama → upsert в Qdrant; документ становится "
+            "done тем батчем, чей атомарный +1 закрыл счётчик",
+            "beat раз в минуту запускает sweeper: застрявшие документы переотправляются; "
+            "упавшие задачи лежат в *.dlq, make dlq-replay возвращает их",
             "Токенизатор bge-m3 грузится в родителе до fork: дети делят память (copy-on-write)",
         ],
-        code=["workers/tasks/ingest.py", "workers/runtime.py", "services/ingest.py"],
+        code=[
+            "workers/tasks/ingest.py",
+            "workers/runtime.py",
+            "services/ingest.py",
+            "rag/parsing/",
+            "rag/chunking/structural.py",
+        ],
         admin="flower",
         x=700,
         y=350,

@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}{{ doc.title or doc.filename }} · RAG-агенты{% endblock %}
+{% block content %}
+<nav class="small mb-2"><a href="/agents/{{ agent.id }}">← {{ agent.name }}</a></nav>
+<h1 class="h4 mb-1">{{ doc.title or doc.filename }}</h1>
+<div class="text-secondary small mb-3">
+  {% if doc.author %}{{ doc.author }} · {% endif %}{{ doc.filename }} · {{ doc.format.value }} · {{ doc.size_bytes|filesize }}
+  · статус <span class="badge text-bg-{{ 'success' if doc.status.value == 'done' else 'danger' if doc.status.value == 'failed' else 'secondary' }}">{{ doc.status.value }}</span>
+  {% if doc.error_message %}<span class="text-danger">{{ doc.error_message }} ({{ doc.error_code }})</span>{% endif %}
+</div>
+<dl class="row small mb-4">
+  <dt class="col-sm-3">Оглавление</dt>
+  <dd class="col-sm-9">{{ {'native': 'из файла (TOC, стили, разметка)', 'heuristic': 'эвристика заголовков', 'none': 'не найдено — одна секция'}.get(doc.meta.get('toc_source'), '—') }}</dd>
+  {% if doc.meta.get('encoding') %}<dt class="col-sm-3">Кодировка</dt><dd class="col-sm-9">{{ doc.meta.encoding }}</dd>{% endif %}
+  {% if doc.meta.get('pages') %}<dt class="col-sm-3">Страниц</dt><dd class="col-sm-9">{{ doc.meta.pages }}</dd>{% endif %}
+  {% if doc.meta.get('language') %}<dt class="col-sm-3">Язык</dt><dd class="col-sm-9">{{ doc.meta.language }}</dd>{% endif %}
+  <dt class="col-sm-3">Фрагментов</dt><dd class="col-sm-9">{{ total }}{% if doc.batches_total %} · батчей эмбеддинга {{ doc.batches_done }}/{{ doc.batches_total }}{% endif %}</dd>
+  {% set t = doc.meta.get('timings') or {} %}
+  {% if t %}<dt class="col-sm-3">Время</dt><dd class="col-sm-9">{% for k, v in t.items() %}{{ k }}={{ v|ms }}{% if not loop.last %} · {% endif %}{% endfor %}</dd>{% endif %}
+</dl>
+
+<div class="row g-4">
+  <div class="col-lg-4">
+    <h2 class="h6">Оглавление ({{ toc|length }})</h2>
+    <ol class="list-unstyled small toc-list">
+      {% for item in toc %}
+      <li style="padding-left: {{ (item.section_path|length - 1) * 0.8 if item.section_path else 0 }}rem">
+        <a href="?page={{ (item.first_ord // page_size) + 1 }}#chunk-{{ item.first_ord }}" class="text-decoration-none">{{ item.section_path[-1] if item.section_path else '(без заголовка)' }}</a>
+        <span class="text-secondary">· {{ item.chunks }} фр. · {{ item.tokens }} ток.</span>
+      </li>
+      {% endfor %}
+    </ol>
+  </div>
+  <div class="col-lg-8">
+    <h2 class="h6">Фрагменты {{ (page - 1) * page_size + 1 if total else 0 }}–{{ [page * page_size, total]|min }} из {{ total }}</h2>
+    {% for ch in chunks %}
+    <div class="card mb-2" id="chunk-{{ ch.ord }}">
+      <div class="card-header small py-1 d-flex justify-content-between">
+        <span>#{{ ch.ord }} · {{ ch.section_path|join(' / ') or '—' }}</span>
+        <span class="text-secondary">{{ ch.token_count }} ток.{% if ch.page_from %} · стр. {{ ch.page_from }}{% if ch.page_to != ch.page_from %}–{{ ch.page_to }}{% endif %}{% endif %}</span>
+      </div>
+      <div class="card-body py-2 small chunk-text">{{ ch.text }}</div>
+    </div>
+    {% else %}
+    <p class="text-secondary small">Фрагментов нет{% if doc.status.value in ('queued', 'processing') %} — документ ещё обрабатывается{% endif %}.</p>
+    {% endfor %}
+    {% if pages > 1 %}
+    <nav><ul class="pagination pagination-sm flex-wrap">
+      {% for p in range(1, pages + 1) %}
+        {% if p == 1 or p == pages or (p - page)|abs <= 3 %}
+        <li class="page-item {{ 'active' if p == page }}"><a class="page-link" href="?page={{ p }}">{{ p }}</a></li>
+        {% elif (p - page)|abs == 4 %}<li class="page-item disabled"><span class="page-link">…</span></li>{% endif %}
+      {% endfor %}
+    </ul></nav>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

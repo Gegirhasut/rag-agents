@@ -27,7 +27,7 @@ from rag_agents.domain.chats import MessageOut, MessagePair
 from rag_agents.domain.enums import MessageRole, MessageStatus
 from rag_agents.llm.base import LLMError, LLMProvider, LLMRequest, LLMUsage
 from rag_agents.llm.prices import CostBreakdown, PriceTable
-from rag_agents.rag.chunking.naive import normalize_for_index
+from rag_agents.rag.cleaning.orthography import norm_text
 from rag_agents.rag.embeddings.ollama import Embedder
 from rag_agents.rag.index.qdrant import QdrantChunkIndex
 from rag_agents.rag.prompting.builder import (
@@ -544,7 +544,7 @@ class QueryService:
             input=question,
             model=self.embedder.model,
         ) as span:
-            [vector] = await self.embedder.embed([normalize_for_index(question)])
+            [vector] = await self.embedder.embed([norm_text(question)])
             span.update(output={"dim": len(vector)})
         t_embed = _ms(t)
         await emit(

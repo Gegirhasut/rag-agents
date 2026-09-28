@@ -45,3 +45,10 @@ class MessageStatus(StrEnum):
     DONE = "done"
     ERROR = "error"
     CANCELLED = "cancelled"
+
+
+class JobStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"

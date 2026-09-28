@@ -7,7 +7,7 @@
   <tbody>
   {% for d in docs %}
     <tr id="doc-{{ d.id }}">
-      <td class="text-break">{{ d.title or d.filename }}{% if d.title and d.title != d.filename %}<div class="small text-secondary">{{ d.filename }}</div>{% endif %}</td>
+      <td class="text-break"><a href="/agents/{{ aid }}/documents/{{ d.id }}" class="text-decoration-none">{{ d.title or d.filename }}</a>{% if d.title and d.title != d.filename %}<div class="small text-secondary">{{ d.filename }}</div>{% endif %}</td>
       <td class="text-end small text-nowrap">{{ d.size_bytes|filesize }}</td>
       <td class="doc-status" data-status="{{ d.status.value }}">
         {% if d.status.value == 'done' %}
@@ -15,9 +15,9 @@
           <div class="small text-secondary">{{ d.chunks_total }} чанков{% if d.duration_s %} · {{ '%.0f'|format(d.duration_s) }} с{% endif %}{% if insights_enabled %} · <a href="/insights/sessions/document-{{ d.id }}" class="text-decoration-none">🔎 трейс</a>{% endif %}</div>
         {% elif d.status.value == 'failed' %}
           <span class="badge text-bg-danger">failed</span>
-          <div class="small text-danger">{{ d.error_message }}{% if insights_enabled %} · <a href="/insights/sessions/document-{{ d.id }}" class="text-decoration-none">🔎 трейс</a>{% endif %}</div>
+          <div class="small text-danger">{{ d.error_message }} <span class="text-secondary">({{ d.error_code }})</span>{% if insights_enabled %} · <a href="/insights/sessions/document-{{ d.id }}" class="text-decoration-none">🔎 трейс</a>{% endif %}</div>
         {% elif d.status.value == 'processing' %}
-          <span class="badge text-bg-primary">processing</span> <span class="small">{{ d.stage }}</span>
+          <span class="badge text-bg-primary">processing</span> <span class="small">{{ d.stage }}{% if d.batches_total %} · батчей {{ d.batches_done }}/{{ d.batches_total }}{% endif %}</span>
           <div class="progress mt-1" role="progressbar" aria-valuenow="{{ d.progress }}" style="height: 6px">
             <div class="progress-bar" style="width: {{ d.progress }}%"></div>
           </div>

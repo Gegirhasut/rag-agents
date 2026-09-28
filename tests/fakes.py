@@ -6,7 +6,7 @@ from types import TracebackType
 from typing import Any, Literal, Self, Unpack
 
 from rag_agents.core.observability import ObservationFields, ObservationType, trace_id_for
-from rag_agents.domain.tasks import IngestDocumentTask
+from rag_agents.domain.tasks import DeleteDocumentTask, EmbedBatchTask, ParseTask, PurgeAgentTask
 from rag_agents.llm.base import LLMChunk, LLMRequest, LLMUsage
 
 VECTOR = [0.5, 0.5, 0.5, 0.5]
@@ -36,10 +36,32 @@ class FakeLLM:
 class RecordingPublisher:
     """TaskPublisher без RabbitMQ: запоминает опубликованные задачи."""
 
-    tasks: list[IngestDocumentTask] = field(default_factory=list)
+    tasks: list[ParseTask] = field(default_factory=list)
+    embeds: list[EmbedBatchTask] = field(default_factory=list)
+    deletes: list[DeleteDocumentTask] = field(default_factory=list)
+    purges: list[PurgeAgentTask] = field(default_factory=list)
 
-    def publish_ingest(self, task: IngestDocumentTask) -> None:
+    def publish_parse(self, task: ParseTask) -> None:
         self.tasks.append(task)
+
+    def publish_embed(self, tasks: list[EmbedBatchTask]) -> None:
+        self.embeds.extend(tasks)
+
+    def publish_delete_document(self, task: DeleteDocumentTask) -> None:
+        self.deletes.append(task)
+
+    def publish_purge_agent(self, task: PurgeAgentTask) -> None:
+        self.purges.append(task)
+
+
+class WordCounter:
+    """Детерминированный счётчик токенов: 1 слово = 1 токен (без токенизатора bge-m3)."""
+
+    def count(self, text: str) -> int:
+        return len(text.split())
+
+    def count_batch(self, texts: list[str]) -> list[int]:
+        return [self.count(t) for t in texts]
 
 
 @dataclass

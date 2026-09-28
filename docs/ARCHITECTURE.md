@@ -717,10 +717,10 @@ class LLMProvider(Protocol):
 
 | Шаг | Библиотека | Где работает |
 |---|---|---|
-| Детект формата | расширение + magic bytes (`filetype`) | web (до очереди) |
+| Детект формата | расширение + magic bytes (свой `rag/parsing/detect.py`: `%PDF-`, `PK\x03\x04`, `<?xml`/`<FictionBook`, отсутствие NUL в txt) | web (до очереди) |
 | TXT | `charset-normalizer` | worker-ingest |
 | FB2 | `lxml` (iterparse), `zipfile` для `.fb2.zip` | worker-ingest |
-| EPUB | `ebooklib` + `selectolax` | worker-ingest |
+| EPUB | свой разбор OPF/NAV/NCX (`lxml`) + `selectolax` для XHTML. `ebooklib` не берём: AGPL | worker-ingest |
 | PDF | `PyMuPDF` (AGPL — допустимо для открытого pet-проекта; альтернатива `pypdfium2`) | worker-ingest |
 | DOCX | `python-docx` | worker-ingest |
 | Предложения | `razdel` (Natasha) | worker-ingest |
@@ -948,6 +948,7 @@ CREATE TABLE documents (
   title text, author text, meta jsonb NOT NULL DEFAULT '{}',   -- ParsedMeta, toc
   chunks_total int, batches_total int, batches_done int NOT NULL DEFAULT 0,
   heartbeat_at timestamptz,                     -- sweeper зависших
+  job_id uuid,                                  -- текущая попытка (ingest_jobs.id); задачи прежних попыток — no-op
   created_at timestamptz NOT NULL DEFAULT now(), started_at timestamptz, finished_at timestamptz,
   UNIQUE (agent_id, sha256)
 );
@@ -981,6 +982,7 @@ CREATE TABLE embed_batches (                    -- идемпотентный у
   job_id uuid NOT NULL REFERENCES ingest_jobs ON DELETE CASCADE,
   batch_no int NOT NULL, ord_from int NOT NULL, ord_to int NOT NULL,
   status job_status NOT NULL DEFAULT 'pending', attempts int NOT NULL DEFAULT 0,
+  embed_ms int, upsert_ms int,                  -- тайминги батча; сумма → documents.meta.timings
   PRIMARY KEY (job_id, batch_no)
 );
 
@@ -1055,6 +1057,7 @@ client.create_payload_index("chunks__bge_m3_567m__1024", "document_id", field_sc
 
 - `m=0, payload_m=16`: глобальный HNSW не строится, строятся графы по каждому `agent_id`. Запрос без фильтра по агенту шёл бы полным перебором, но таких запросов в коде нет (репозиторий этого не позволяет).
 - Оригиналы float32 лежат на диске (`on_disk`), а в RAM — int8-квантованные (×4 экономии) с rescoring по оригиналам. 100k чанков × 1024 × 1 байт ≈ 100 МБ RAM.
+- **Факт итерации 3:** в dev-VM квантизация **выключена** (`QDRANT_QUANTIZATION=false`, по умолчанию). На CPU без AVX Qdrant 1.19 падает с SIGILL, когда строит HNSW по квантизованным векторам: это проявилось, как только коллекция переросла порог индексации (~2.5k точек после «Войны и мира»). Воспроизведено на тестовом инстансе: HNSW без квантизации и квантизация без HNSW работают, вместе — падение. Без квантизации поиск идёт по float32 с диска через page cache; на десятках тысяч точек это миллисекунды. На сервере с AVX2 — включить: `ensure_collection` сам переведёт существующую коллекцию (и обратно).
 - `is_tenant=true` группирует точки тенанта на диске, и поиск по одному агенту читает меньше страниц.
 
 ### 9.2 Операции
@@ -1111,7 +1114,7 @@ worker_prefetch_multiplier = 1  # длинные задачи, честное р
 task_time_limit = 1500
 task_soft_time_limit = 1200  # < consumer_timeout RabbitMQ (30 мин)
 worker_max_tasks_per_child = 50
-worker_max_memory_per_child = 400_000  # KiB, защита от утечек парсеров
+worker_proc_alive_timeout = 60  # инициализация ребёнка под нагрузкой > 4 с (дефолт)
 task_serializer = "json"
 result_backend = "redis://…/1"
 task_ignore_result = True  # результаты не нужны
@@ -1149,6 +1152,19 @@ broker_connection_retry_on_startup = True
 - Лимит на документ — 20 000 чанков (~8 млн токенов). Сверху — `failed: too_large` с подсказкой разбить файл.
 
 ---
+
+### 10.6 Реализация (итерация 3)
+
+- **Задачи:** `rag_agents.ingest.parse` (ingest.parse), `rag_agents.ingest.embed` (ingest.embed), `rag_agents.maintenance.delete_document`, `…purge_agent`, `…sweep` (maintenance). Payload — Pydantic-модели из `domain/tasks.py`, только ID.
+- **Попытка = `ingest_jobs`.** Загрузка, `retry` и перезапуск sweeper-ом создают новую строку и пишут её id в `documents.job_id`. `claim` и батчи сверяют `job_id`: сообщения прежней попытки становятся no-op. Так «Повторить» не смешивает старые и новые батчи.
+- **Parse:** claim → парсер (генератор секций) → структурный чанкер (генератор) → `INSERT chunks` пачками по 500 с heartbeat → удаление старых точек документа → `start_embedding` (условный UPDATE: документ всё ещё наш и в `processing`) + `embed_batches` + публикация батчей после коммита.
+- **Embed:** батч читает чанки `ord_from..ord_to` из PG (в сообщении только номер батча), эмбеддит, upsert-ит; затем в одной транзакции `complete_batch` (только первый исполнитель) → `batches_done + 1 RETURNING` → при равенстве `batches_total` финализация (`done`, тайминги, `corpus_version + 1`).
+- **Replay из DLQ:** `failed` с кодом `transient_exhausted` / `internal_error` можно захватить снова, а батч дописывается и в `failed`-документ: когда закрывается последний батч, документ становится `done`, ошибка сбрасывается. `rag-agents dlq replay <queue>` перекладывает сообщения и обнуляет счётчик ретраев Celery.
+- **Удаление:** документ → `deleting` сразу (скрыт из списков), задача maintenance чистит Qdrant, PG (чанки, jobs каскадом) и файл. Батч, закончивший upsert после удаления, видит `deleting` и удаляет свои точки. Агент — мягкое удаление + `purge_agent` (точки по фильтру `agent_id` во всех его коллекциях, документы, каталог файлов).
+- **Sweeper** (beat, 60 с): `queued` дольше 2 мин → переотправка parse; `processing` без heartbeat 10 мин → новая попытка; `deleting` дольше 5 мин → переотправка удаления.
+- **Трейс ingest** — один на попытку: `trace_id = hash("ingest:{document_id}:{job_id}")`. Parse и каждый батч (другие процессы) пишут в него свои корневые span-ы (`ingest`, `embed_batch`).
+- **Хаос-переключатель (dev):** `make chaos-embed` ставит ключ в Redis, следующий батч падает с внутренней ошибкой → `ingest.embed.dlq`. Для демонстрации replay.
+- **request_id** из web уходит заголовком сообщения; `task_prerun` кладёт его и `task_id` в контекст логов воркера.
 
 ## 11. Кэш и экономия токенов
 
@@ -1259,14 +1275,14 @@ Docker обходит ufw, поэтому всё служебное публик
 |---|---|---|---|
 | ollama (bge-m3, CPU) | **2.5g** | 3.0 | `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_MAX_LOADED_MODELS=1`, `OLLAMA_KEEP_ALIVE=24h`. Модель F16 ~1.2 ГБ + буферы |
 | reranker | **1g** | 3.0 | bge-reranker-v2-m3 int8 ONNX ~570 МБ + арена ORT; `intra_op_num_threads=3`, `enable_cpu_mem_arena` с лимитом |
-| qdrant | 640m | 1.0 | `on_disk` векторы, int8-квантование в RAM |
-| worker-ingest | 640m | 2.0 | `--concurrency=2`, `--max-memory-per-child=400000`. Токенизатор bge-m3 (~240 МБ в RAM, замер) грузится в родителе до fork (`preload_worker_resources`), дети делят его через copy-on-write: пик ~550 МБ. Без этого 2 × 370 МБ + родитель уходили в swap, ingest «Исповеди» — 177 с вместо 15 с |
+| qdrant | 640m | 1.0 | `on_disk` векторы; int8-квантование в RAM — только на CPU с AVX (§9.1, `QDRANT_QUANTIZATION`) |
+| worker-ingest | 768m | 2.0 | `--concurrency=2`, `--max-memory-per-child=600000` (RSS ребёнка включает общие страницы токенизатора; при 400000 ребёнок перезапускался после каждой задачи, а под нагрузкой не успевал инициализироваться за дефолтные 4 с — отсюда `worker_proc_alive_timeout=60`). Токенизатор bge-m3 (~240 МБ в RAM, замер) грузится в родителе до fork (`preload_worker_resources`), дети делят его через copy-on-write: пик ~550 МБ. Без этого 2 × 370 МБ + родитель уходили в swap, ingest «Исповеди» — 177 с вместо 15 с |
 | postgres | 512m | 1.0 | `shared_buffers=128MB`, `work_mem=8MB`, `max_connections=50` |
 | web (uvicorn) | 448m | 1.5 | 2 воркера (`--workers 2`); BM25-энкодер ~60 МБ на процесс. Токенизатор bge-m3 весит ~240 МБ на процесс: uvicorn `--workers` запускает процессы через `spawn`, CoW не поможет. Если web понадобится считать токены — пересчитать лимит (+~240 МБ × воркеры) |
 | rabbitmq | 384m | 0.5 | `vm_memory_high_watermark.absolute=256MiB` |
-| worker-embed | 256m | 0.5 | `--concurrency=2` (I/O, ждёт Ollama) |
+| worker-embed | 384m | 0.5 | `--concurrency=2` (I/O, ждёт Ollama). `WORKER_ROLE=embed`: токенизатор и парсеры не грузятся. Замер — SPEC §9 |
 | redis | 192m | 0.25 | `maxmemory 128mb`, `allkeys-lru`. Сессии лежат в той же БД 0 (префикс `sess:`): отдельная БД от вытеснения не спасает — `maxmemory` общий на инстанс. Худший случай — перелогин. Когда появится кэш ответов (итерация 7), переходим на `volatile-lru`: у всех кэш-ключей есть TTL |
-| beat | 128m | 0.1 | — |
+| beat | 160m | 0.1 | sweeper раз в минуту |
 | **Итого** | **≈ 6.6 GiB** | | ~1.2 GiB остаётся ОС, dockerd и page cache, плюс 2 GiB swap |
 
 По сравнению с прошлой раскладкой ушли php-fpm (384m), laravel queue (192m) и nginx (64m). Добавились reranker (1g), второй воркер и beat. Итог вырос на ~0.5 GiB (6.1 → 6.6). Одноразовый `reranker-export` (torch, ~2 ГБ пиково) запускается один раз при **остановленном** стеке. Перекос покрывается так:

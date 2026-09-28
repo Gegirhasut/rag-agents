@@ -2,10 +2,11 @@ from collections.abc import AsyncIterator
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, Response
 
 from rag_agents.domain.documents import DocumentOut
+from rag_agents.services.documents import DOCUMENT_PAGE_SIZE
 from rag_agents.services.errors import NotFoundError, ValidationError
 from rag_agents.services.ratelimit import RateLimitedError, Rule
 from rag_agents.web.deps import ContainerDep, OwnerDep
@@ -104,3 +105,32 @@ async def delete_document(
     """Пустой ответ: HTMX удаляет строку (hx-swap="delete")."""
     await c.documents.delete(owner, agent_id, document_id)
     return HTMLResponse("")
+
+
+@router.get("/agents/{agent_id}/documents/{document_id}", response_class=HTMLResponse)
+async def document_page(
+    request: Request,
+    agent_id: UUID,
+    document_id: UUID,
+    c: ContainerDep,
+    owner: OwnerDep,
+    page: Annotated[int, Query(ge=1, le=10_000)] = 1,
+) -> Response:
+    """Отладка парсинга: метаданные, оглавление по чанкам, чанки постранично."""
+    agent = await c.agents.get(owner, agent_id)
+    doc, toc, chunks, total = await c.documents.detail(owner, agent_id, document_id, page=page)
+    pages = max(1, -(-total // DOCUMENT_PAGE_SIZE))
+    return templates.TemplateResponse(
+        request,
+        "pages/document.html",
+        {
+            "agent": agent,
+            "doc": doc,
+            "toc": toc,
+            "chunks": chunks,
+            "total": total,
+            "page": page,
+            "pages": pages,
+            "page_size": DOCUMENT_PAGE_SIZE,
+        },
+    )

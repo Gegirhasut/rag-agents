@@ -15,9 +15,11 @@ from rag_agents.core.db import Database
 from rag_agents.core.observability import NoopTracer
 from rag_agents.domain.auth import UserOut
 from rag_agents.llm.prices import PriceTable
+from rag_agents.rag.chunking.structural import StructuralChunker
+from rag_agents.services.ingest import IngestService
 from rag_agents.services.query import QueryService
 from rag_agents.web.app import create_app
-from tests.fakes import VECTOR, FakeEmbedder, FakeLLM, RecordingPublisher
+from tests.fakes import VECTOR, FakeEmbedder, FakeLLM, RecordingPublisher, WordCounter
 
 pytestmark = pytest.mark.integration
 
@@ -67,6 +69,21 @@ class Stack:
     container: Container
     publisher: RecordingPublisher
 
+    async def drain(self) -> int:
+        """Исполняет опубликованные задачи, как воркеры, пока очереди не опустеют."""
+        p, ingest, n = self.publisher, self.container.ingest, 0
+        while p.tasks or p.embeds or p.deletes or p.purges:
+            if p.tasks:
+                await ingest.parse(p.tasks.pop(0), final_attempt=False)
+            elif p.embeds:
+                await ingest.embed_batch(p.embeds.pop(0), final_attempt=False)
+            elif p.deletes:
+                await ingest.delete_document(p.deletes.pop(0))
+            else:
+                await ingest.purge_agent(p.purges.pop(0))
+            n += 1
+        return n
+
     async def user(self, *, admin: bool = False) -> UserOut:
         email = f"u-{uuid.uuid4().hex[:8]}@test.local"
         return await self.container.auth.create_user(email, PASSWORD, is_admin=admin)
@@ -91,6 +108,7 @@ async def stack(tmp_path_factory: pytest.TempPathFactory) -> AsyncIterator[Stack
         rl_login_per_min=10_000,
         rl_questions_per_min=10_000,
         rl_uploads_per_hour=10_000,
+        embedding_batch_size=4,  # несколько батчей даже на маленьких фикстурах
     )
     publisher = RecordingPublisher()
 
@@ -106,6 +124,21 @@ async def stack(tmp_path_factory: pytest.TempPathFactory) -> AsyncIterator[Stack
             settings,
             NoopTracer(),
             PriceTable({}),
+        )
+        # Ingest как в воркере, но с детерминированным счётчиком токенов и фейковым эмбеддером
+        c._ingest = IngestService(
+            c.db,
+            c.documents.storage,
+            lambda: StructuralChunker(
+                WordCounter(), target=40, max_tokens=60, min_tokens=5, overlap=8
+            ),
+            FakeEmbedder(),
+            c.query.index,
+            c.documents.progress,
+            c.trace,
+            settings,
+            NoopTracer(),
+            publisher,
         )
         return c
 

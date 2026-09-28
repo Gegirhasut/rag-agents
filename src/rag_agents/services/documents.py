@@ -1,7 +1,6 @@
 import builtins
 from collections.abc import AsyncIterator
 from pathlib import PurePath
-from typing import Protocol
 from uuid import UUID
 
 import anyio
@@ -11,36 +10,29 @@ from rag_agents.core.config import Settings
 from rag_agents.core.db import Database
 from rag_agents.core.ids import uuid7
 from rag_agents.core.storage import FileTooLargeError, LocalFileStorage
-from rag_agents.domain.documents import DocumentOut
+from rag_agents.domain.documents import ChunkOut, DocumentOut, TocItem
 from rag_agents.domain.enums import DocumentStatus, SourceFormat
-from rag_agents.domain.tasks import IngestDocumentTask
-from rag_agents.rag.index.qdrant import QdrantChunkIndex
+from rag_agents.domain.tasks import DeleteDocumentTask, ParseTask
+from rag_agents.rag.parsing.detect import UnsupportedFormatError, format_by_name, magic_matches
 from rag_agents.repositories.agents import AgentRepository
+from rag_agents.repositories.chunks import ChunkRepository
 from rag_agents.repositories.documents import DocumentRepository
 from rag_agents.services.errors import ConflictError, NotFoundError, ValidationError
 from rag_agents.services.progress import ProgressStore
+from rag_agents.services.publisher import TaskPublisher
 from rag_agents.services.trace import TraceBus
 
 log = structlog.get_logger()
 
-# Итерация 1 — только txt; остальные форматы появятся в итерации 3
-SUPPORTED: dict[str, SourceFormat] = {".txt": SourceFormat.TXT}
-PLANNED = {".fb2", ".epub", ".pdf", ".docx"}
-
-
-class TaskPublisher(Protocol):
-    def publish_ingest(self, task: IngestDocumentTask) -> None: ...
+_MAGIC_BYTES = 8192
+DOCUMENT_PAGE_SIZE = 20
 
 
 def detect_format(filename: str) -> SourceFormat:
-    suffix = PurePath(filename).suffix.lower()
-    if suffix in SUPPORTED:
-        return SUPPORTED[suffix]
-    if suffix in PLANNED:
-        raise ValidationError(
-            f"Формат {suffix} появится в следующих итерациях; сейчас — только .txt"
-        )
-    raise ValidationError(f"Неподдерживаемый формат: {suffix or 'без расширения'}")
+    try:
+        return format_by_name(filename)
+    except UnsupportedFormatError as e:
+        raise ValidationError(str(e)) from e
 
 
 class DocumentService:
@@ -52,10 +44,8 @@ class DocumentService:
         publisher: TaskPublisher,
         trace: TraceBus,
         settings: Settings,
-        index: QdrantChunkIndex,
     ) -> None:
         self.db = db
-        self.index = index
         self.storage = storage
         self.progress = progress
         self.publisher = publisher
@@ -90,6 +80,10 @@ class DocumentService:
         if stored.size == 0:
             await self.storage.delete(stored.key)
             raise ValidationError("Файл пустой")
+        head = await anyio.Path(self.storage.path(stored.key)).read_bytes()
+        if not magic_matches(fmt, head[:_MAGIC_BYTES]):
+            await self.storage.delete(stored.key)
+            raise ValidationError(f"Содержимое файла не похоже на {fmt.value.upper()}")
         await self.trace.emit(
             "upload.stored",
             "web",
@@ -109,7 +103,8 @@ class DocumentService:
                 storage_key=stored.key,
             )
             if created:
-                task = IngestDocumentTask(document_id=doc.id, index_id=index_id)
+                job_id = await DocumentRepository(uow.session).new_job(doc.id, index_id)
+                task = ParseTask(document_id=doc.id, job_id=job_id, index_id=index_id)
                 uow.on_commit(
                     lambda: self.trace.emit(
                         "pg.document",
@@ -119,13 +114,13 @@ class DocumentService:
                         agent_id=agent_id,
                     )
                 )
-                uow.on_commit(lambda: anyio.to_thread.run_sync(self.publisher.publish_ingest, task))
+                uow.on_commit(lambda: anyio.to_thread.run_sync(self.publisher.publish_parse, task))
                 uow.on_commit(
                     lambda: self.trace.emit(
                         "celery.published",
                         "web",
                         "rabbitmq",
-                        "После COMMIT: задача ingest_document (только ID) → очередь ingest.parse",
+                        "После COMMIT: задача parse (только ID) → очередь ingest.parse",
                         agent_id=agent_id,
                     )
                 )
@@ -185,41 +180,44 @@ class DocumentService:
                 if await repo.get(agent_id, document_id) is None:
                     raise NotFoundError("document")
                 raise ConflictError("Повторить можно только документ в статусе failed")
-            task = IngestDocumentTask(document_id=doc.id, index_id=agent.active_index_id)
-            uow.on_commit(lambda: anyio.to_thread.run_sync(self.publisher.publish_ingest, task))
+            job_id = await repo.new_job(doc.id, agent.active_index_id)
+            task = ParseTask(document_id=doc.id, job_id=job_id, index_id=agent.active_index_id)
+            uow.on_commit(lambda: anyio.to_thread.run_sync(self.publisher.publish_parse, task))
             await uow.commit()
         log.info("document.retry", agent_id=str(agent_id), document_id=str(document_id))
         return doc
 
     async def delete(self, owner_id: UUID, agent_id: UUID, document_id: UUID) -> None:
-        """Синхронное удаление документа в конечном статусе: точки Qdrant → строка PG
-        (чанки каскадом) → файл. corpus_version растёт: кэши ответов станут невалидны.
+        """Асинхронное удаление: статус deleting (документ сразу пропадает из списков),
+        очистку Qdrant, PG и файла делает задача очереди maintenance.
 
-        Документ в работе удалять нельзя (409): воркер допишет точки после удаления.
-        Асинхронное удаление через статус deleting — итерация 3.
+        Можно и посреди обработки: воркер увидит deleting и не допишет точки.
         """
-        async with self.db.session() as s:
-            agents = AgentRepository(s)
-            agent = await agents.get(owner_id, agent_id)
-            if agent is None:
-                raise NotFoundError("agent")
-            doc = await DocumentRepository(s).get(agent_id, document_id)
-            if doc is None:
-                raise NotFoundError("document")
-            if not doc.status.is_terminal:
-                raise ConflictError("Документ ещё обрабатывается — удалить можно после завершения")
-            idx = (
-                await agents.get_index(agent_id, agent.active_index_id)
-                if agent.active_index_id
-                else None
-            )
-        if idx is not None:
-            # Сначала Qdrant: если он недоступен, документ остаётся целым, можно повторить
-            await self.index.delete_document(idx.collection, agent_id, document_id)
         async with self.db.uow() as uow:
-            if not await DocumentRepository(uow.session).delete_terminal(agent_id, document_id):
-                raise ConflictError("Статус документа изменился, повторите")
-            await AgentRepository(uow.session).bump_corpus_version(agent_id)
+            if await AgentRepository(uow.session).get(owner_id, agent_id) is None:
+                raise NotFoundError("agent")
+            repo = DocumentRepository(uow.session)
+            doc = await repo.mark_deleting(agent_id, document_id)
+            if doc is None:
+                if await repo.get(agent_id, document_id) is None:
+                    raise NotFoundError("document")
+                return  # уже удаляется
+            task = DeleteDocumentTask(document_id=document_id, agent_id=agent_id)
+            uow.on_commit(
+                lambda: anyio.to_thread.run_sync(self.publisher.publish_delete_document, task)
+            )
             await uow.commit()
-        await self.storage.delete(doc.storage_key)
-        log.info("document.deleted", agent_id=str(agent_id), document_id=str(document_id))
+        log.info("document.delete_queued", agent_id=str(agent_id), document_id=str(document_id))
+
+    async def detail(
+        self, owner_id: UUID, agent_id: UUID, document_id: UUID, *, page: int = 1
+    ) -> tuple[DocumentOut, builtins.list[TocItem], builtins.list[ChunkOut], int]:
+        """Страница документа: оглавление по чанкам и страница чанков (отладка парсинга)."""
+        doc = await self.get(owner_id, agent_id, document_id)
+        async with self.db.session() as s:
+            chunks = ChunkRepository(s)
+            toc = await chunks.toc(agent_id, document_id)
+            total = await chunks.count(agent_id, document_id)
+            start = (max(page, 1) - 1) * DOCUMENT_PAGE_SIZE
+            items = await chunks.range(agent_id, document_id, start, start + DOCUMENT_PAGE_SIZE - 1)
+        return doc, toc, items, total

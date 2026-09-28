@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -21,7 +22,12 @@ class DocumentOut(BaseModel):
     error_code: str | None
     error_message: str | None
     title: str | None
+    author: str | None = None
     chunks_total: int | None
+    batches_total: int | None = None
+    batches_done: int = 0
+    job_id: UUID | None = None
+    meta: dict[str, Any] = {}
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
@@ -44,6 +50,8 @@ class ChunkDraft(BaseModel):
     token_count: int
     char_start: int
     char_end: int
+    page_from: int | None = None
+    page_to: int | None = None
 
 
 class ChunkPayload(BaseModel):
@@ -60,3 +68,28 @@ class ChunkPayload(BaseModel):
     page_from: int | None = None
     page_to: int | None = None
     text: str
+
+
+class ChunkOut(BaseModel):
+    """Чанк для страницы документа и для батча эмбеддинга."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    ord: int
+    section_path: list[str]
+    chapter_title: str | None
+    text: str
+    embed_text: str
+    token_count: int
+    page_from: int | None
+    page_to: int | None
+
+
+class TocItem(BaseModel):
+    """Строка оглавления документа: секция и её чанки (по данным chunks)."""
+
+    section_path: list[str]
+    first_ord: int
+    chunks: int
+    tokens: int

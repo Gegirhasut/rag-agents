@@ -1,6 +1,7 @@
 import re
 from uuid import UUID
 
+import anyio
 import structlog
 
 from rag_agents.core.config import Settings
@@ -12,10 +13,12 @@ from rag_agents.domain.agents import (
     AgentSettings,
     AgentUpdate,
 )
+from rag_agents.domain.tasks import PurgeAgentTask
 from rag_agents.rag.index.qdrant import QdrantChunkIndex, collection_name
 from rag_agents.repositories.agents import AgentRepository
 from rag_agents.repositories.users import UserRepository
 from rag_agents.services.errors import NotFoundError
+from rag_agents.services.publisher import TaskPublisher
 
 log = structlog.get_logger()
 
@@ -33,8 +36,15 @@ def slugify(name: str) -> str:
 
 
 class AgentService:
-    def __init__(self, db: Database, index: QdrantChunkIndex, settings: Settings) -> None:
+    def __init__(
+        self,
+        db: Database,
+        index: QdrantChunkIndex,
+        settings: Settings,
+        publisher: TaskPublisher,
+    ) -> None:
         self.db = db
+        self.publisher = publisher
         self.index = index
         self.settings = settings
 
@@ -108,9 +118,14 @@ class AgentService:
         return agent
 
     async def delete(self, owner_id: UUID, agent_id: UUID) -> None:
-        """Мягкое удаление: агент сразу пропадает из всех чтений (и API, и web)."""
+        """Мягкое удаление: агент сразу пропадает из всех чтений (и API, и web); точки Qdrant,
+        документы и файлы очищает задача purge_agent (очередь maintenance)."""
         async with self.db.uow() as uow:
             if not await AgentRepository(uow.session).soft_delete(owner_id, agent_id):
                 raise NotFoundError("agent")
+            task = PurgeAgentTask(agent_id=agent_id)
+            uow.on_commit(
+                lambda: anyio.to_thread.run_sync(self.publisher.publish_purge_agent, task)
+            )
             await uow.commit()
         log.info("agent.deleted", agent_id=str(agent_id))

@@ -60,6 +60,7 @@ class AgentOut(BaseModel):
     active_index_id: UUID | None
     corpus_version: int
     created_at: datetime
+    deleted_at: datetime | None = None
 
 
 class AgentIndexOut(BaseModel):

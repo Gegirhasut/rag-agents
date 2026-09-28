@@ -11,13 +11,19 @@ from collections.abc import Coroutine
 from typing import Any
 
 import structlog
-from celery.signals import worker_init, worker_process_init, worker_process_shutdown
+from celery.signals import (
+    task_postrun,
+    task_prerun,
+    worker_init,
+    worker_process_init,
+    worker_process_shutdown,
+)
 from kombu import Connection
 
 from rag_agents.container import Container, build_container, preload_worker_resources
 from rag_agents.core.config import get_settings
 from rag_agents.core.logging import configure_logging
-from rag_agents.workers.celery_app import CeleryPublisher, dlq_queues
+from rag_agents.workers.celery_app import REQUEST_ID_HEADER, CeleryPublisher, dlq_queues
 
 _loop: asyncio.AbstractEventLoop | None = None
 _container: Container | None = None
@@ -48,7 +54,9 @@ def _init_parent(**_: Any) -> None:
         channel = conn.default_channel
         for q in dlq_queues():
             q.bind(channel).declare()
-    preload_worker_resources(settings)
+    # Токенизатор нужен только парсингу: worker-embed (WORKER_ROLE=embed) его не грузит
+    if settings.worker_role != "embed":
+        preload_worker_resources(settings)
 
 
 @worker_process_init.connect
@@ -72,3 +80,23 @@ def _shutdown_process(**_: Any) -> None:
     if _loop is not None and _container is not None:
         _loop.run_until_complete(_container.aclose())
         _loop.close()
+
+
+@task_prerun.connect
+def _bind_task_context(task_id: str | None = None, task: Any = None, **_: Any) -> None:
+    """task_id и request_id (заголовок сообщения из web) — в каждую строку лога задачи.
+
+    Any: сигнатура сигналов Celery.
+    """
+    structlog.contextvars.clear_contextvars()
+    request_id = getattr(getattr(task, "request", None), REQUEST_ID_HEADER, None)
+    structlog.contextvars.bind_contextvars(
+        task_id=task_id,
+        task=getattr(task, "name", None),
+        **({"request_id": request_id} if request_id else {}),
+    )
+
+
+@task_postrun.connect
+def _clear_task_context(**_: Any) -> None:
+    structlog.contextvars.clear_contextvars()

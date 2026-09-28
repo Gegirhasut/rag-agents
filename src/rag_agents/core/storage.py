@@ -1,4 +1,6 @@
+import contextlib
 import hashlib
+import shutil
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,3 +57,14 @@ class LocalFileStorage:
 
     async def delete(self, key: str) -> None:
         await anyio.Path(self.path(key)).unlink(missing_ok=True)
+
+    async def delete_agent_dir(self, agent_id: UUID) -> None:
+        """Все файлы агента: <root>/<agent_id>/… (очистка удалённого агента)."""
+        target = self.path(str(agent_id))
+        await anyio.to_thread.run_sync(lambda: shutil.rmtree(target, ignore_errors=True))
+
+    async def delete_document_dir(self, key: str) -> None:
+        """Файл документа и его пустой каталог <agent>/<document>/."""
+        await self.delete(key)
+        with contextlib.suppress(OSError):
+            await anyio.Path(self.path(key)).parent.rmdir()

@@ -43,12 +43,23 @@ class QdrantChunkIndex:
     Метода поиска без фильтра агента нет намеренно (ARCHITECTURE §1, §9).
     """
 
-    def __init__(self, client: AsyncQdrantClient) -> None:
+    def __init__(self, client: AsyncQdrantClient, *, quantization: bool = False) -> None:
         self.client = client
+        # int8-квантизация векторов в RAM. На CPU без AVX Qdrant 1.19 падает с SIGILL,
+        # когда строит HNSW по квантизованным векторам — поэтому включается настройкой
+        self.quantization = quantization
+
+    def _quantization_config(self) -> models.ScalarQuantization | None:
+        if not self.quantization:
+            return None
+        return models.ScalarQuantization(
+            scalar=models.ScalarQuantizationConfig(type=models.ScalarType.INT8, always_ram=True)
+        )
 
     async def ensure_collection(self, name: str, dim: int) -> None:
         try:
             if await self.client.collection_exists(name):
+                await self._sync_quantization(name)
                 return
             await self.client.create_collection(
                 name,
@@ -62,11 +73,7 @@ class QdrantChunkIndex:
                     SPARSE: models.SparseVectorParams(modifier=models.Modifier.IDF)
                 },
                 hnsw_config=models.HnswConfigDiff(m=0, payload_m=16),
-                quantization_config=models.ScalarQuantization(
-                    scalar=models.ScalarQuantizationConfig(
-                        type=models.ScalarType.INT8, always_ram=True
-                    )
-                ),
+                quantization_config=self._quantization_config(),
             )
             await self.client.create_payload_index(
                 name,
@@ -85,6 +92,16 @@ class QdrantChunkIndex:
             raise TransientError(f"qdrant: {e}") from e
         except ResponseHandlingException as e:
             raise TransientError(f"qdrant unreachable: {e}") from e
+
+    async def _sync_quantization(self, name: str) -> None:
+        """Коллекция создана с другой настройкой квантизации — приводим к текущей."""
+        info = await self.client.get_collection(name)
+        has = info.config.quantization_config is not None
+        if has == self.quantization:
+            return
+        await self.client.update_collection(
+            name, quantization_config=self._quantization_config() or models.Disabled.DISABLED
+        )
 
     async def upsert(
         self,
@@ -142,6 +159,21 @@ class QdrantChunkIndex:
                 wait=True,
             )
         except (ResponseHandlingException, UnexpectedResponse) as e:
+            raise TransientError(f"qdrant delete failed: {e}") from e
+
+    async def delete_agent(self, collection: str, agent_id: UUID) -> None:
+        """Все точки агента в коллекции (очистка удалённого агента)."""
+        try:
+            await self.client.delete(
+                collection,
+                points_selector=models.FilterSelector(filter=_agent_filter(agent_id)),
+                wait=True,
+            )
+        except UnexpectedResponse as e:
+            if e.status_code == 404:  # noqa: PLR2004  коллекции нет — нечего удалять
+                return
+            raise TransientError(f"qdrant delete failed: {e}") from e
+        except ResponseHandlingException as e:
             raise TransientError(f"qdrant delete failed: {e}") from e
 
     # --- Чтение для страницы «Под капотом» (/system) ---

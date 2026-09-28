@@ -132,7 +132,9 @@ async def test_api_agent_documents_and_query_flow(stack: Stack) -> None:
     r = await api.post(f"{base}/documents/{doc['id']}/retry", headers=auth)
     assert (r.status_code, r.json()["code"]) == (409, "conflict")
     r = await api.delete(f"{base}/documents/{doc['id']}", headers=auth)
-    assert r.status_code == 409  # в работе удалять нельзя
+    assert r.status_code == 202  # удаление асинхронное, можно и посреди обработки
+    r = await api.get(f"{base}/documents", headers=auth)
+    assert r.json() == []  # deleting в списке не показывается
 
     # Коллекция пустая → отказ «не нашёл» без LLM, но формат ответа полный
     r = await api.post(f"{base}/query", json={"question": "В чём смысл жизни?"}, headers=auth)

@@ -18,16 +18,17 @@ from rag_agents.core.observability import Tracer, build_tracer
 from rag_agents.core.storage import LocalFileStorage
 from rag_agents.llm.openai_compat import OpenAICompatProvider
 from rag_agents.llm.prices import load_prices
-from rag_agents.rag.chunking.naive import NaiveChunker
+from rag_agents.rag.chunking.structural import StructuralChunker
 from rag_agents.rag.chunking.tokenizer import load_token_counter
 from rag_agents.rag.embeddings.ollama import OllamaEmbedder
 from rag_agents.rag.index.qdrant import QdrantChunkIndex
 from rag_agents.services.agents import AgentService
 from rag_agents.services.auth import AuthService
-from rag_agents.services.documents import DocumentService, TaskPublisher
+from rag_agents.services.documents import DocumentService
 from rag_agents.services.ingest import IngestService
 from rag_agents.services.insights import InsightsService
 from rag_agents.services.progress import ProgressStore
+from rag_agents.services.publisher import TaskPublisher
 from rag_agents.services.query import QueryService
 from rag_agents.services.ratelimit import RateLimiter
 from rag_agents.services.sessions import SessionStore
@@ -96,7 +97,7 @@ def build_container(
     ollama_http = httpx.AsyncClient(
         base_url=settings.ollama_base_url, timeout=httpx.Timeout(300, connect=5)
     )
-    index = QdrantChunkIndex(qdrant)
+    index = QdrantChunkIndex(qdrant, quantization=settings.qdrant_quantization)
     embedder = OllamaEmbedder(
         ollama_http, settings.embedding_model, settings.embedding_dim, settings.embedding_num_thread
     )
@@ -123,13 +124,20 @@ def build_container(
     )
     ingest = None
     if with_ingest:
-        chunker = NaiveChunker(
-            load_token_counter(settings.tokenizer_path),
-            target=settings.chunk_target_tokens,
-            max_tokens=settings.chunk_max_tokens,
-        )
+
+        def chunker() -> StructuralChunker:
+            # Токенизатор кэширован на процесс (load_token_counter), в worker-ingest загружен
+            # в родителе до fork; worker-embed до этой фабрики не доходит
+            return StructuralChunker(
+                load_token_counter(settings.tokenizer_path),
+                target=settings.chunk_target_tokens,
+                max_tokens=settings.chunk_max_tokens,
+                min_tokens=settings.chunk_min_tokens,
+                overlap=settings.chunk_overlap_tokens,
+            )
+
         ingest = IngestService(
-            db, storage, chunker, embedder, index, progress, trace, settings, tracer
+            db, storage, chunker, embedder, index, progress, trace, settings, tracer, publisher
         )
     return Container(
         settings=settings,
@@ -139,8 +147,8 @@ def build_container(
         ollama_http=ollama_http,
         rabbit_http=rabbit_http,
         llm=llm,
-        agents=AgentService(db, index, settings),
-        documents=DocumentService(db, storage, progress, publisher, trace, settings, index),
+        agents=AgentService(db, index, settings, publisher),
+        documents=DocumentService(db, storage, progress, publisher, trace, settings),
         query=QueryService(db, embedder, index, llm, trace, settings, tracer, prices),
         trace=trace,
         system=SystemService(db, redis, index, ollama_http, rabbit_http, inspect_active, settings),

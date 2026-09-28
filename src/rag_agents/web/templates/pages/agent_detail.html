@@ -16,10 +16,10 @@
           hx-target="#docs-panel" hx-swap="innerHTML" hx-disabled-elt="find button"
           hx-on::after-request="if(event.detail.successful) this.reset()" class="mb-3">
       <div class="input-group">
-        <input class="form-control" type="file" name="files" accept=".txt" multiple required>
+        <input class="form-control" type="file" name="files" accept=".txt,.fb2,.zip,.epub,.pdf,.docx" multiple required>
         <button class="btn btn-outline-primary" type="submit">Загрузить</button>
       </div>
-      <div class="form-text">Итерация 1: только .txt (UTF-8, cp1251, koi8-r), до 100 МБ.</div>
+      <div class="form-text">.txt (UTF-8, cp1251, koi8-r), .fb2, .fb2.zip, .epub, .pdf (с текстовым слоем), .docx — до 100 МБ.</div>
     </form>
     <div id="docs-panel">
       {% include "fragments/documents_panel.html" %}

@@ -7,7 +7,7 @@
 
 Документы: [SPEC](docs/SPEC.md) · [ARCHITECTURE](docs/ARCHITECTURE.md) · [PLAN](docs/PLAN.md) · [CLAUDE.md](CLAUDE.md) (правила разработки).
 
-**Статус:** итерация 2 — вход по паролю, JSON API с ключами, живые статусы, rate limit. Итерация 1 — сквозной скелет (txt → очередь → Qdrant → вопрос → стрим DeepSeek).
+**Статус:** итерация 3 — ingest production-grade: 5 форматов (txt, fb2/fb2.zip, epub, pdf, docx), структурный чанкинг по главам, очереди с фан-аутом батчей, DLQ и replay, асинхронное удаление. Итерация 2 — вход, JSON API с ключами, rate limit. Итерация 1 — сквозной скелет.
 
 Обзор проекта со схемами (стек, workflow индексации и ответа, метрики): откройте [docs/interview/index.html](docs/interview/index.html) в браузере.
 
@@ -68,6 +68,19 @@ make langfuse-trace id=<trace>   # дерево span-ов, токены, cost и
 Сводка — на странице **📊 Аналитика** (`/insights`): стоимость, латентность, первый токен, доля 👍, агенты, где тратится время, последние запросы с деревом шагов. Сводка считается по нашей БД (работает и без Langfuse), дерево шагов — из Langfuse по клику. Стоимость — по `configs/llm_prices.yaml` с тарифами peak/off-peak DeepSeek. Под каждым ответом — ссылка «🔎 трейс». Демо-данные: `make demo-traffic ROUNDS=2` (≈ $0.06).
 
 Трейс создаётся на каждый вопрос (поиск, эмбеддинг, генерация DeepSeek) и на каждую индексацию документа. Кнопки 👍/👎 под ответом становятся score `user_feedback` на трейсе ответа. Подробности — [ARCHITECTURE §14.2](docs/ARCHITECTURE.md#142-трейсы--langfuse-cloud-eu).
+
+## Как проверить итерацию 3 руками
+
+Критерии — [PLAN, итерация 3](docs/PLAN.md#итерация-3--ingest-production-grade-форматы-структура-очереди-56-дней).
+
+1. **Сервисы:** `docker compose ps` — `worker-ingest`, `worker-embed`, `beat` вместо одного `worker`. RabbitMQ UI → Queues: `ingest.parse`, `ingest.embed`, `maintenance`, `eval` и их `*.dlq`.
+2. **Форматы.** В агента загрузить книги разных форматов (примеры — `tests/fixtures/`: fb2, fb2.zip, epub, pdf, docx, txt в cp1251). В строке документа видно `processing · embedding · батчей N/M`, затем `done`.
+3. **Оглавление и чанки:** клик по названию документа → страница с метаданными (источник оглавления, кодировка, страницы, тайминги), оглавлением по главам и чанками постранично (номера страниц PDF, число токенов).
+4. **Ошибки без ретраев:** `tests/fixtures/broken.pdf` → `failed: Файл повреждён (corrupted)`, `scan.pdf` → `no_text_layer`. `.docx`, переименованный в `.pdf`, отклоняется при загрузке.
+5. **DLQ и replay:** `make chaos-embed`, загрузить документ → он `failed (internal_error)`, в RabbitMQ `ingest.embed.dlq` — 1 сообщение. `make dlq-replay QUEUE=ingest.embed` → документ становится `done`.
+6. **Chaos-kill:** загрузить большую книгу, посреди эмбеддинга `docker kill rag-agents-worker-embed-1`, затем `docker compose up -d worker-embed` — документ доезжает до `done`, число точек в Qdrant равно `chunks_total` (сообщения вернулись в очередь благодаря `acks_late`, дубли отсекает учёт батчей).
+7. **Удаление:** ✕ у документа — строка исчезает сразу, через секунды точки удалены из Qdrant (карта векторов на `/system`), файл — с диска. Удаление агента чистит всё в фоне.
+8. **Sweeper:** `make logs s=beat` — раз в минуту `maintenance.sweep`; застрявшие документы переотправляются сами.
 
 ## Как проверить итерацию 2 руками
 

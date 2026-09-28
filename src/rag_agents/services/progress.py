@@ -47,3 +47,6 @@ class ProgressStore:
                 pipe.hget(self._key(did), "progress")
             values = await pipe.execute()
         return {did: int(v) for did, v in zip(document_ids, values, strict=True) if v is not None}
+
+    async def clear(self, document_id: UUID) -> None:
+        await self.redis.delete(self._key(document_id))

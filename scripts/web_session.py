@@ -11,7 +11,7 @@ import sys
 import httpx
 
 
-def _dotenv(name: str) -> str | None:
+def dotenv(name: str) -> str | None:
     try:
         with open(".env", encoding="utf-8") as f:
             for line in f:
@@ -27,13 +27,13 @@ def credentials() -> tuple[str, str]:
     email = (
         os.environ.get("RAG_EMAIL")
         or os.environ.get("SEED_USER_EMAIL")
-        or _dotenv("SEED_USER_EMAIL")
+        or dotenv("SEED_USER_EMAIL")
         or "owner@local"
     )
     password = (
         os.environ.get("RAG_PASSWORD")
         or os.environ.get("SEED_USER_PASSWORD")
-        or _dotenv("SEED_USER_PASSWORD")
+        or dotenv("SEED_USER_PASSWORD")
     )
     if not password:
         sys.exit(

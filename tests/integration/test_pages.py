@@ -39,7 +39,7 @@ USAGE_REFUSAL = {**USAGE_CURRENT, "model": "none", "provider": "none", "cost_usd
 
 
 @pytest.fixture(scope="module")
-async def rich_agent(stack: Stack) -> tuple[str, UUID]:
+async def rich_agent(stack: Stack) -> tuple[str, UUID, UUID]:
     """Агент со всеми видами сообщений и документов, которые встречаются в живой БД."""
     c = stack.container
     user = await stack.user(admin=True)
@@ -78,7 +78,7 @@ async def rich_agent(stack: Stack) -> tuple[str, UUID]:
                 trace_id="0" * 32,
             )
         await uow.commit()
-    return user.email, agent.id
+    return user.email, agent.id, ok_doc.id
 
 
 def _one(data: bytes):  # type: ignore[no-untyped-def]
@@ -107,6 +107,8 @@ PAGES = [
     "/agents/new",
     "/agents/{agent}",
     "/agents/{agent}/documents/status",
+    "/agents/{agent}/documents/{doc}",
+    "/agents/{agent}/documents/{doc}?page=2",
     "/settings/api-keys",
     "/insights",
     "/insights/overview?period=24h",
@@ -119,20 +121,20 @@ PAGES = [
 
 @pytest.mark.parametrize("path", PAGES)
 async def test_page_renders_on_real_world_data(
-    browser: Browser, rich_agent: tuple[str, UUID], path: str
+    browser: Browser, rich_agent: tuple[str, UUID, UUID], path: str
 ) -> None:
-    email, agent_id = rich_agent
+    email, agent_id, doc_id = rich_agent
     b = browser()
     await b.login(email)
-    url = path.format(agent=agent_id)
+    url = path.format(agent=agent_id, doc=doc_id)
     r = await b.http.get(url, headers={"HX-Request": "true"} if "/status" in path else None)
     assert r.status_code in (200, 286), f"{url} → {r.status_code}: {r.text[:300]}"
 
 
 async def test_agent_page_shows_old_and_new_usage(
-    browser: Browser, rich_agent: tuple[str, UUID]
+    browser: Browser, rich_agent: tuple[str, UUID, UUID]
 ) -> None:
-    email, agent_id = rich_agent
+    email, agent_id, _ = rich_agent
     b = browser()
     await b.login(email)
     html = (await b.http.get(f"/agents/{agent_id}")).text

@@ -1,6 +1,6 @@
 name: rag-agents
 
-# Лимиты памяти и порты — ARCHITECTURE §13. Пока один воркер, без reranker/beat (итерации 3 и 5).
+# Лимиты памяти и порты — ARCHITECTURE §13. Воркеры: worker-ingest, worker-embed, beat; reranker — итерация 5.
 # Эмбеддинги по умолчанию считает Ollama на Windows-хосте (OLLAMA_BASE_URL): в VM нет AVX.
 # Ollama в контейнере — профиль local-ollama: docker compose --profile local-ollama up -d
 # Секреты и пароли — только из .env (compose подставляет ${VAR} из него автоматически).
@@ -14,6 +14,7 @@ x-app-env: &app-env
   CELERY_BROKER_URL: amqp://${RABBITMQ_DEFAULT_USER:?set in .env}:${RABBITMQ_DEFAULT_PASS:?set in .env}@rabbitmq:5672//
   REDIS_URL: redis://redis:6379/0
   QDRANT_URL: http://qdrant:6333
+  QDRANT_QUANTIZATION: ${QDRANT_QUANTIZATION:-false}
   OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://10.0.2.2:11434}
   EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3:567m}
   # Для профиля local-ollama ставьте = cpus сервиса ollama (3): иначе llama.cpp запускает
@@ -195,27 +196,75 @@ services:
     mem_limit: 448m
     cpus: 1.5
 
-  worker:
+  # Парсинг и чанкинг (CPU, токенизатор bge-m3 ~240 МБ грузится в родителе до fork) +
+  # удаления и sweeper. Эмбеддинг — отдельным воркером: он I/O-bound и ждёт Ollama.
+  worker-ingest:
     <<: *app
+    environment:
+      <<: *app-env
+      WORKER_ROLE: ingest
     command:
       - celery
       - -A
       - rag_agents.workers.celery_app:celery_app
       - worker
       - -Q
-      - ingest.parse,ingest.embed,maintenance,eval
+      - ingest.parse,maintenance,eval
       - --concurrency=2
-      - --max-memory-per-child=400000
+      - --hostname=ingest@%h
+      # KiB. RSS ребёнка включает общие (CoW) страницы токенизатора ~240 МБ: при 400000
+      # ребёнок перезапускался после каждой задачи. Порог — страховка от утечек парсеров
+      - --max-memory-per-child=600000
       - --loglevel=INFO
-    depends_on:
+    depends_on: &worker-deps
       migrate:
         condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
       qdrant:
         condition: service_healthy
-    mem_limit: 640m
+    mem_limit: 768m
     cpus: 2.0
+
+  worker-embed:
+    <<: *app
+    environment:
+      <<: *app-env
+      WORKER_ROLE: embed
+    command:
+      - celery
+      - -A
+      - rag_agents.workers.celery_app:celery_app
+      - worker
+      - -Q
+      - ingest.embed
+      # Ollama обрабатывает один запрос за раз (NUM_PARALLEL=1): больше — только очередь
+      # и таймауты. 2 = пока один батч эмбеддится, второй пишет в Qdrant и PG
+      - --concurrency=2
+      - --hostname=embed@%h
+      # Батч — секунды; перезапуск ребёнка каждые 50 задач (дефолт проекта) при cpus 0.5
+      # стоил ~10 с инициализации каждые ~3 мин. Утечек у эмбеддинга нет — реже
+      - --max-tasks-per-child=500
+      - --loglevel=INFO
+    depends_on: *worker-deps
+    mem_limit: 384m
+    cpus: 0.5
+
+  # Планировщик: раз в минуту sweeper (переотправка застрявших документов, §10.4)
+  beat:
+    <<: *app
+    command:
+      - celery
+      - -A
+      - rag_agents.workers.celery_app:celery_app
+      - beat
+      - --schedule=/tmp/celerybeat-schedule
+      - --loglevel=INFO
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    mem_limit: 160m
+    cpus: 0.1
 
   # --- Профиль debug: веб-админки для изучения стенда (make up-debug), ~450 МБ ---
   flower:

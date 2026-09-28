@@ -1,16 +1,18 @@
 from datetime import timedelta
 from uuid import UUID
 
-from sqlalchemy import delete, or_, select, type_coerce, update
+from sqlalchemy import delete, func, or_, select, type_coerce, update
 from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rag_agents.core.ids import utcnow
+from rag_agents.core.ids import utcnow, uuid7
 from rag_agents.domain.documents import DocumentOut
 from rag_agents.domain.enums import DocumentStatus, IngestStage
-from rag_agents.models.entities import Document
+from rag_agents.models.entities import Document, IngestJob
 
 STALE_AFTER = timedelta(minutes=10)
+# failed с этими кодами можно захватить повторно (replay из DLQ): сбой был не в данных
+RETRIABLE_CODES = ("transient_exhausted", "internal_error")
 
 
 class DocumentRepository:
@@ -73,17 +75,24 @@ class DocumentRepository:
         doc = await self.s.get(Document, document_id)
         return DocumentOut.model_validate(doc) if doc else None
 
-    async def claim(self, document_id: UUID) -> bool:
-        """Условный UPDATE вместо SELECT-then-UPDATE: повторная доставка задачи — no-op."""
+    async def claim(self, document_id: UUID, job_id: UUID) -> bool:
+        """Условный UPDATE вместо SELECT-then-UPDATE: повторная доставка задачи — no-op.
+
+        Захватить можно queued, «протухший» processing (воркер умер) и failed после
+        инфраструктурной ошибки — последнее нужно для replay из DLQ. Только текущая попытка.
+        """
         now = utcnow()
         result = await self.s.execute(
             update(Document)
             .where(
                 Document.id == document_id,
+                Document.job_id == job_id,
                 or_(
                     Document.status == DocumentStatus.QUEUED,
                     (Document.status == DocumentStatus.PROCESSING)
                     & (Document.heartbeat_at < now - STALE_AFTER),
+                    (Document.status == DocumentStatus.FAILED)
+                    & Document.error_code.in_(RETRIABLE_CODES),
                 ),
             )
             .values(
@@ -91,12 +100,116 @@ class DocumentRepository:
                 stage=IngestStage.PARSING.value,
                 heartbeat_at=now,
                 started_at=now,
+                finished_at=None,
                 error_code=None,
                 error_message=None,
+                batches_total=None,
+                batches_done=0,
             )
             .returning(Document.id)
         )
         return result.scalar_one_or_none() is not None
+
+    async def new_job(self, document_id: UUID, index_id: UUID) -> UUID:
+        """Новая попытка обработки: задачи прежних попыток после этого — no-op."""
+        job_id = uuid7()
+        self.s.add(IngestJob(id=job_id, document_id=document_id, index_id=index_id))
+        await self.s.flush()
+        await self.s.execute(
+            update(Document)
+            .where(Document.id == document_id)
+            .values(job_id=job_id, heartbeat_at=utcnow())
+        )
+        return job_id
+
+    async def start_embedding(
+        self,
+        document_id: UUID,
+        job_id: UUID,
+        *,
+        title: str | None,
+        author: str | None,
+        meta: dict[str, object],
+        chunks_total: int,
+        batches_total: int,
+    ) -> bool:
+        """Конец парсинга. False — документ тем временем удаляют или перезапустили."""
+        found = await self.s.scalar(
+            update(Document)
+            .where(
+                Document.id == document_id,
+                Document.job_id == job_id,
+                Document.status == DocumentStatus.PROCESSING,
+            )
+            .values(
+                stage=IngestStage.EMBEDDING.value,
+                title=title,
+                author=author,
+                meta=meta,
+                chunks_total=chunks_total,
+                batches_total=batches_total,
+                batches_done=0,
+                heartbeat_at=utcnow(),
+            )
+            .returning(Document.id)
+        )
+        return found is not None
+
+    async def increment_batches(self, document_id: UUID, job_id: UUID) -> tuple[int, int] | None:
+        """+1 готовый батч (атомарно). Возвращает (готово, всего) для решения о финализации."""
+        row = (
+            await self.s.execute(
+                update(Document)
+                .where(Document.id == document_id, Document.job_id == job_id)
+                .values(batches_done=Document.batches_done + 1, heartbeat_at=utcnow())
+                .returning(Document.batches_done, Document.batches_total)
+            )
+        ).first()
+        return (row[0], row[1] or 0) if row else None
+
+    async def mark_deleting(self, agent_id: UUID, document_id: UUID) -> DocumentOut | None:
+        doc = await self.s.scalar(
+            update(Document)
+            .where(
+                Document.id == document_id,
+                Document.agent_id == agent_id,
+                Document.status != DocumentStatus.DELETING,
+            )
+            .values(status=DocumentStatus.DELETING, heartbeat_at=utcnow())
+            .returning(Document)
+        )
+        return DocumentOut.model_validate(doc) if doc else None
+
+    async def delete_row(self, document_id: UUID) -> None:
+        await self.s.execute(delete(Document).where(Document.id == document_id))
+
+    async def list_ids_for_agent(self, agent_id: UUID) -> list[DocumentOut]:
+        """Для очистки агента: все документы, включая deleting."""
+        rows = await self.s.scalars(select(Document).where(Document.agent_id == agent_id))
+        return [DocumentOut.model_validate(d) for d in rows]
+
+    async def stale(self, status: DocumentStatus, older_than: timedelta) -> list[DocumentOut]:
+        """Для sweeper: документы, которые слишком долго не двигаются."""
+        cutoff = utcnow() - older_than
+        rows = await self.s.scalars(
+            select(Document)
+            .where(
+                Document.status == status,
+                func.coalesce(Document.heartbeat_at, Document.created_at) < cutoff,
+            )
+            .limit(100)
+        )
+        return [DocumentOut.model_validate(d) for d in rows]
+
+    async def touch(self, document_id: UUID) -> None:
+        await self.heartbeat(document_id)
+
+    async def requeue_stale(self, document_id: UUID) -> None:
+        await self.s.execute(
+            update(Document)
+            .where(Document.id == document_id, Document.status == DocumentStatus.PROCESSING)
+            .values(status=DocumentStatus.QUEUED, stage=None)
+        )
 
     async def set_stage(
         self,
@@ -125,14 +238,19 @@ class DocumentRepository:
         )
 
     async def mark_done(self, document_id: UUID, timings: dict[str, int] | None = None) -> None:
-        """timings (мс по шагам) дописываются в meta.timings, остальной meta не трогаем."""
+        """timings (мс по шагам) дописываются в meta.timings, остальной meta не трогаем.
+
+        Ошибка сбрасывается: документ мог быть failed, пока батч лежал в DLQ (replay).
+        """
         patch = type_coerce({"timings": timings or {}}, JSONB)
         await self.s.execute(
             update(Document)
-            .where(Document.id == document_id)
+            .where(Document.id == document_id, Document.status != DocumentStatus.DELETING)
             .values(
                 status=DocumentStatus.DONE,
                 stage=None,
+                error_code=None,
+                error_message=None,
                 finished_at=utcnow(),
                 meta=Document.meta.op("||")(patch),
             )
@@ -141,7 +259,7 @@ class DocumentRepository:
     async def mark_failed(self, document_id: UUID, code: str, message: str) -> None:
         await self.s.execute(
             update(Document)
-            .where(Document.id == document_id)
+            .where(Document.id == document_id, Document.status != DocumentStatus.DELETING)
             .values(
                 status=DocumentStatus.FAILED,
                 error_code=code,
@@ -179,16 +297,3 @@ class DocumentRepository:
             .returning(Document)
         )
         return DocumentOut.model_validate(doc) if doc else None
-
-    async def delete_terminal(self, agent_id: UUID, document_id: UUID) -> bool:
-        """Удаляет документ в конечном статусе (чанки — каскадом). В работе — не трогаем."""
-        found = await self.s.scalar(
-            delete(Document)
-            .where(
-                Document.id == document_id,
-                Document.agent_id == agent_id,
-                Document.status.in_([DocumentStatus.DONE, DocumentStatus.FAILED]),
-            )
-            .returning(Document.id)
-        )
-        return found is not None

@@ -104,6 +104,39 @@ def seed(
     _run_with_container(_seed)
 
 
+dlq_app = typer.Typer(no_args_is_help=True, help="Dead letter queues")
+app.add_typer(dlq_app, name="dlq")
+
+
+@dlq_app.command("replay")
+def dlq_replay(
+    queue: str,
+    limit: Annotated[int | None, typer.Option(help="Сколько сообщений (по умолчанию все)")] = None,
+) -> None:
+    """Переложить сообщения из <queue>.dlq обратно в <queue>: rag-agents dlq replay ingest.embed"""
+    from rag_agents.workers.dlq import replay  # noqa: PLC0415  kombu нужен только этой команде
+
+    try:
+        result = replay(queue, limit)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
+    typer.echo(f"{result.queue}.dlq → {result.queue}: {result.replayed} сообщений")
+
+
+@app.command()
+def chaos_embed() -> None:
+    """Следующий батч эмбеддинга упадёт с внутренней ошибкой → ingest.embed.dlq (только dev)."""
+    from rag_agents.services.ingest import CHAOS_EMBED_KEY  # noqa: PLC0415
+
+    async def _set(c: Container) -> None:
+        if c.settings.app_env == "prod":
+            raise typer.BadParameter("в prod хаос-переключатель выключен")
+        await c.redis.set(CHAOS_EMBED_KEY, "1", ex=3600)
+        typer.echo("следующий батч эмбеддинга упадёт (ключ действует 1 час)")
+
+    _run_with_container(_set)
+
+
 @app.command()
 def version() -> None:
     typer.echo("rag-agents 0.1.0")

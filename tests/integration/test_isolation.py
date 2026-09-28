@@ -8,11 +8,13 @@ from uuid import UUID, uuid4
 
 import pytest
 from qdrant_client import AsyncQdrantClient
+from sqlalchemy import update
 
 from rag_agents.core.db import Database
 from rag_agents.domain.agents import AgentCreate, AgentOut, AgentSettings
 from rag_agents.domain.documents import ChunkPayload
-from rag_agents.domain.enums import MessageRole, MessageStatus
+from rag_agents.domain.enums import DocumentStatus, MessageRole, MessageStatus
+from rag_agents.models.entities import Document
 from rag_agents.rag.index.qdrant import QdrantChunkIndex, chunk_point_id, collection_name
 from rag_agents.repositories.agents import AgentRepository
 from rag_agents.repositories.chats import ChatRepository
@@ -214,13 +216,21 @@ async def test_claim_is_single_winner(db: Database) -> None:
             sha256=hashlib.sha256(uuid4().bytes).digest(),
             storage_key="k",
         )
+        assert agent.active_index_id is not None
+        job_id = await DocumentRepository(uow.session).new_job(doc.id, agent.active_index_id)
         await uow.commit()
     wins = []
     for _ in range(2):  # повторная доставка той же задачи
         async with db.uow() as uow:
-            wins.append(await DocumentRepository(uow.session).claim(doc.id))
+            wins.append(await DocumentRepository(uow.session).claim(doc.id, job_id))
             await uow.commit()
     assert wins == [True, False]
+    async with db.uow() as uow:  # задача прежней попытки документ не захватит
+        await DocumentRepository(uow.session).new_job(doc.id, agent.active_index_id)
+        await uow.session.execute(
+            update(Document).where(Document.id == doc.id).values(status=DocumentStatus.QUEUED)
+        )
+        assert not await DocumentRepository(uow.session).claim(doc.id, job_id)
 
 
 async def test_insights_facts_are_scoped_to_owner(db: Database) -> None:
@@ -270,6 +280,7 @@ FOREIGN_CASES: list[tuple[str, str, str]] = [
     ("GET", "/agents/{agent}", "web"),
     ("POST", "/agents/{agent}/documents", "web"),
     ("GET", "/agents/{agent}/documents/status", "web"),
+    ("GET", "/agents/{agent}/documents/{doc}", "web"),
     ("POST", "/agents/{agent}/documents/{doc}/retry", "web"),
     ("DELETE", "/agents/{agent}/documents/{doc}", "web"),
     ("POST", "/agents/{agent}/chats/new/messages", "web"),

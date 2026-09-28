@@ -21,6 +21,7 @@ def _agent_out(a: Agent) -> AgentOut:
         active_index_id=a.active_index_id,
         corpus_version=a.corpus_version,
         created_at=a.created_at,
+        deleted_at=a.deleted_at,
     )
 
 
@@ -133,3 +134,12 @@ class AgentRepository:
             .returning(Agent.id)
         )
         return found is not None
+
+    async def get_any(self, agent_id: UUID) -> AgentOut | None:
+        """Включая мягко удалённых: для задачи очистки."""
+        a = await self.s.get(Agent, agent_id)
+        return _agent_out(a) if a else None
+
+    async def list_indexes(self, agent_id: UUID) -> list[AgentIndexOut]:
+        rows = await self.s.scalars(select(AgentIndex).where(AgentIndex.agent_id == agent_id))
+        return [AgentIndexOut.model_validate(i) for i in rows]

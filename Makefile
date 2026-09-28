@@ -5,7 +5,7 @@ TEST_COMPOSE := docker compose -f compose.test.yaml
 TEST_ENV := DATABASE_URL=postgresql+asyncpg://rag_test:rag_test@127.0.0.1:15432/rag_test \
             QDRANT_URL=http://127.0.0.1:16333 REDIS_URL=redis://127.0.0.1:16379/0 APP_ENV=test
 
-.PHONY: help up up-debug down build logs ps migrate seed sh lint fmt test test-unit test-integration test-up test-down smoke demo-traffic langfuse-check langfuse-model langfuse-trace
+.PHONY: dlq-replay chaos-embed help up up-debug down build logs ps migrate seed sh lint fmt test test-unit test-integration test-up test-down smoke demo-traffic langfuse-check langfuse-model langfuse-trace
 
 help:
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -22,7 +22,7 @@ down: ## остановить стенд (данные в volumes сохраня
 build: ## пересобрать образ приложения
 	$(COMPOSE) build web
 
-logs: ## логи сервиса: make logs s=worker
+logs: ## логи сервиса: make logs s=worker-ingest
 	$(COMPOSE) logs -f --tail=200 $(s)
 
 ps: ## состояние сервисов и память
@@ -77,3 +77,9 @@ langfuse-model: ## Langfuse: завести цену LLM_MODEL (идемпоте
 
 langfuse-trace: ## Langfuse: дерево, токены и cost трейса: make langfuse-trace id=<trace_id>
 	$(UV) run python scripts/langfuse_check.py trace $(id)
+
+dlq-replay: ## вернуть сообщения из DLQ в очередь: make dlq-replay QUEUE=ingest.embed
+	$(COMPOSE) exec worker-ingest rag-agents dlq replay $(QUEUE)
+
+chaos-embed: ## следующий батч эмбеддинга упадёт → ingest.embed.dlq (демо replay)
+	$(COMPOSE) exec worker-ingest rag-agents chaos-embed

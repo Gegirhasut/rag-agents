@@ -25,6 +25,9 @@ class Settings(BaseSettings):
 
     qdrant_url: str = "http://qdrant:6333"
     qdrant_collection_prefix: str = ""  # тесты изолируют коллекции префиксом
+    # int8-квантизация в RAM (ARCHITECTURE §9). Выключена: на CPU без AVX (dev-VM) Qdrant
+    # 1.19 падает с SIGILL при построении HNSW по квантизованным векторам. На сервере — true
+    qdrant_quantization: bool = False
 
     ollama_base_url: str = "http://ollama:11434"
     embedding_model: str = "bge-m3:567m"
@@ -51,8 +54,14 @@ class Settings(BaseSettings):
     upload_dir: Path = Path("/data/uploads")
     max_upload_mb: int = Field(100, ge=1)
 
+    # Структурный чанкер (ARCHITECTURE §7.4.2), токены bge-m3
     chunk_target_tokens: int = 400
     chunk_max_tokens: int = 512
+    chunk_min_tokens: int = 80
+    chunk_overlap_tokens: int = 60
+
+    # Роль процесса Celery: embed не грузит токенизатор (~240 МБ), ingest — грузит до fork
+    worker_role: Literal["ingest", "embed", "all"] = "all"
 
     seed_user_email: str = "owner@local"
 
