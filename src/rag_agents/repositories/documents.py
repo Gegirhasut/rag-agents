@@ -1,7 +1,7 @@
 from datetime import timedelta
 from uuid import UUID
 
-from sqlalchemy import or_, select, type_coerce, update
+from sqlalchemy import delete, or_, select, type_coerce, update
 from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -157,3 +157,38 @@ class DocumentRepository:
             .where(Document.id == document_id, Document.status == DocumentStatus.PROCESSING)
             .values(status=DocumentStatus.QUEUED)
         )
+
+    async def reset_failed(self, agent_id: UUID, document_id: UUID) -> DocumentOut | None:
+        """failed → queued для повторной обработки. Из других статусов — None (не повторяем)."""
+        doc = await self.s.scalar(
+            update(Document)
+            .where(
+                Document.id == document_id,
+                Document.agent_id == agent_id,
+                Document.status == DocumentStatus.FAILED,
+            )
+            .values(
+                status=DocumentStatus.QUEUED,
+                stage=None,
+                error_code=None,
+                error_message=None,
+                started_at=None,
+                finished_at=None,
+                batches_done=0,
+            )
+            .returning(Document)
+        )
+        return DocumentOut.model_validate(doc) if doc else None
+
+    async def delete_terminal(self, agent_id: UUID, document_id: UUID) -> bool:
+        """Удаляет документ в конечном статусе (чанки — каскадом). В работе — не трогаем."""
+        found = await self.s.scalar(
+            delete(Document)
+            .where(
+                Document.id == document_id,
+                Document.agent_id == agent_id,
+                Document.status.in_([DocumentStatus.DONE, DocumentStatus.FAILED]),
+            )
+            .returning(Document.id)
+        )
+        return found is not None

@@ -1,12 +1,12 @@
 from uuid import UUID
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_agents.core.ids import utcnow, uuid7
 from rag_agents.domain.agents import AgentIndexOut, AgentListItem, AgentOut, AgentSettings
 from rag_agents.domain.enums import DocumentStatus, IndexStatus
-from rag_agents.models.entities import Agent, AgentIndex, Document, User
+from rag_agents.models.entities import Agent, AgentIndex, Document
 
 
 def _agent_out(a: Agent) -> AgentOut:
@@ -22,20 +22,6 @@ def _agent_out(a: Agent) -> AgentOut:
         corpus_version=a.corpus_version,
         created_at=a.created_at,
     )
-
-
-class UserRepository:
-    def __init__(self, session: AsyncSession) -> None:
-        self.s = session
-
-    async def get_or_create(self, email: str) -> UUID:
-        uid = await self.s.scalar(select(User.id).where(User.email == email))
-        if uid is not None:
-            return uid
-        user = User(id=uuid7(), email=email)
-        self.s.add(user)
-        await self.s.flush()
-        return user.id
 
 
 class AgentRepository:
@@ -125,3 +111,25 @@ class AgentRepository:
         agent = await self.s.get(Agent, agent_id, with_for_update=True)
         if agent is not None:
             agent.corpus_version += 1
+
+    async def update_fields(
+        self, owner_id: UUID, agent_id: UUID, values: dict[str, object]
+    ) -> AgentOut | None:
+        a = await self.s.scalar(
+            update(Agent)
+            .where(Agent.id == agent_id, Agent.owner_id == owner_id, Agent.deleted_at.is_(None))
+            .values(**values, updated_at=func.now())
+            .returning(Agent)
+        )
+        return _agent_out(a) if a else None
+
+    async def soft_delete(self, owner_id: UUID, agent_id: UUID) -> bool:
+        """Агент исчезает для всех чтений сразу; точки в Qdrant и файлы удалит задача
+        очистки (итерация 3)."""
+        found = await self.s.scalar(
+            update(Agent)
+            .where(Agent.id == agent_id, Agent.owner_id == owner_id, Agent.deleted_at.is_(None))
+            .values(deleted_at=utcnow())
+            .returning(Agent.id)
+        )
+        return found is not None

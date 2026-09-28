@@ -1,10 +1,45 @@
 """Тестовые двойники, общие для unit и integration."""
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Any, Literal, Self, Unpack
 
 from rag_agents.core.observability import ObservationFields, ObservationType, trace_id_for
+from rag_agents.domain.tasks import IngestDocumentTask
+from rag_agents.llm.base import LLMChunk, LLMRequest, LLMUsage
+
+VECTOR = [0.5, 0.5, 0.5, 0.5]
+
+
+class FakeEmbedder:
+    model = "fake-embed"
+    dim = len(VECTOR)
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        return [VECTOR for _ in texts]
+
+
+class FakeLLM:
+    name = "deepseek"
+    model = "deepseek-flash"
+    reasoning_effort: str | None = "low"
+
+    async def stream(self, req: LLMRequest) -> AsyncIterator[LLMChunk]:
+        for delta in ("Смысл ", "жизни [1]."):
+            yield LLMChunk(delta=delta)
+        usage = LLMUsage(input_tokens=100, cached_input_tokens=40, output_tokens=30)
+        yield LLMChunk(finish_reason="stop", usage=usage)
+
+
+@dataclass
+class RecordingPublisher:
+    """TaskPublisher без RabbitMQ: запоминает опубликованные задачи."""
+
+    tasks: list[IngestDocumentTask] = field(default_factory=list)
+
+    def publish_ingest(self, task: IngestDocumentTask) -> None:
+        self.tasks.append(task)
 
 
 @dataclass

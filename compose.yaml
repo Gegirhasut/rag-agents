@@ -1,6 +1,6 @@
 name: rag-agents
 
-# Лимиты памяти и порты — ARCHITECTURE §13. Итерация 1: один воркер, без reranker/beat.
+# Лимиты памяти и порты — ARCHITECTURE §13. Пока один воркер, без reranker/beat (итерации 3 и 5).
 # Эмбеддинги по умолчанию считает Ollama на Windows-хосте (OLLAMA_BASE_URL): в VM нет AVX.
 # Ollama в контейнере — профиль local-ollama: docker compose --profile local-ollama up -d
 # Секреты и пароли — только из .env (compose подставляет ${VAR} из него автоматически).
@@ -164,7 +164,8 @@ services:
   web:
     <<: *app
     # --timeout-worker-healthcheck: по умолчанию 5 с; на нагруженной VM импорт приложения
-    # занимает до ~40 с, и супервизор uvicorn убивал воркеры до старта
+    # занимает до ~40 с, и супервизор uvicorn убивал воркеры до старта.
+    # --no-access-log: строку на запрос пишет RequestContextMiddleware (JSON, с request_id)
     command:
       - uvicorn
       - rag_agents.web.app:app
@@ -173,6 +174,7 @@ services:
       - --workers=2
       - --proxy-headers
       - --timeout-worker-healthcheck=120
+      - --no-access-log
     ports:
       - "0.0.0.0:8080:8000"
     depends_on:

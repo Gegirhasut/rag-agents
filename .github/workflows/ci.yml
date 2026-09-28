@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "iter-*/**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "1"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    name: ruff · mypy · import-linter
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run lint-imports
+
+  test:
+    name: pytest (unit + integration)
+    runs-on: ubuntu-24.04
+    # Те же версии и порты, что в compose.test.yaml
+    services:
+      postgres:
+        image: postgres:16.15-alpine
+        env:
+          POSTGRES_DB: rag_test
+          POSTGRES_USER: rag_test
+          POSTGRES_PASSWORD: rag_test  # эфемерная БД CI
+        ports: ["15432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U rag_test -d rag_test"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+      redis:
+        image: redis:7.4.11-alpine
+        ports: ["16379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+      qdrant:
+        image: qdrant/qdrant:v1.19.1
+        env:
+          QDRANT__TELEMETRY_DISABLED: "true"
+        ports: ["16333:6333"]
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql+asyncpg://rag_test:rag_test@127.0.0.1:15432/rag_test
+      REDIS_URL: redis://127.0.0.1:16379/0
+      QDRANT_URL: http://127.0.0.1:16333
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync
+      - name: Wait for Qdrant
+        # В образе qdrant нет curl/wget для --health-cmd, ждём снаружи
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:16333/readyz && exit 0
+            sleep 2
+          done
+          exit 1
+      - run: uv run alembic upgrade head
+      - run: uv run pytest tests/unit tests/integration -q

@@ -1,12 +1,23 @@
 import re
 from uuid import UUID
 
+import structlog
+
 from rag_agents.core.config import Settings
 from rag_agents.core.db import Database
-from rag_agents.domain.agents import AgentCreate, AgentListItem, AgentOut, AgentSettings
+from rag_agents.domain.agents import (
+    AgentCreate,
+    AgentListItem,
+    AgentOut,
+    AgentSettings,
+    AgentUpdate,
+)
 from rag_agents.rag.index.qdrant import QdrantChunkIndex, collection_name
-from rag_agents.repositories.agents import AgentRepository, UserRepository
+from rag_agents.repositories.agents import AgentRepository
+from rag_agents.repositories.users import UserRepository
 from rag_agents.services.errors import NotFoundError
+
+log = structlog.get_logger()
 
 _LATIN = "a b v g d e e zh z i i k l m n o p r s t u f h ts ch sh sch - y - e yu ya".split()  # noqa: SIM905
 _TRANSLIT = {
@@ -71,3 +82,35 @@ class AgentService:
             )
             await uow.commit()
         return agent
+
+    async def update(self, owner_id: UUID, agent_id: UUID, data: AgentUpdate) -> AgentOut:
+        """Частичное обновление: меняются только переданные поля (slug не меняется)."""
+        values: dict[str, object] = {}
+        for field in data.model_fields_set:
+            value = getattr(data, field)
+            if field == "name" and value is None:
+                continue  # имя обязательно: null в PATCH означает «не менять»
+            if field == "description":
+                value = value or ""
+            if field == "persona_prompt":
+                value = value or None
+            values[field] = value
+        async with self.db.uow() as uow:
+            repo = AgentRepository(uow.session)
+            agent = (
+                await repo.update_fields(owner_id, agent_id, values)
+                if values
+                else await repo.get(owner_id, agent_id)
+            )
+            if agent is None:
+                raise NotFoundError("agent")
+            await uow.commit()
+        return agent
+
+    async def delete(self, owner_id: UUID, agent_id: UUID) -> None:
+        """Мягкое удаление: агент сразу пропадает из всех чтений (и API, и web)."""
+        async with self.db.uow() as uow:
+            if not await AgentRepository(uow.session).soft_delete(owner_id, agent_id):
+                raise NotFoundError("agent")
+            await uow.commit()
+        log.info("agent.deleted", agent_id=str(agent_id))

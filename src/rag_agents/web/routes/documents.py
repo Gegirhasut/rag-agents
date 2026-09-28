@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse, Response
 
 from rag_agents.domain.documents import DocumentOut
 from rag_agents.services.errors import NotFoundError, ValidationError
+from rag_agents.services.ratelimit import RateLimitedError, Rule
 from rag_agents.web.deps import ContainerDep, OwnerDep
 from rag_agents.web.templating import templates
 
@@ -35,14 +36,18 @@ async def upload_documents(
 ) -> Response:
     errors: list[str] = []
     notes: list[str] = []
+    rule = Rule("uploads", c.settings.rl_uploads_per_hour, 3600)
     for f in files:
         name = f.filename or "file"
         try:
+            await c.rate_limiter.check(rule, str(owner))
             _, created = await c.documents.upload(owner, agent_id, name, _iter_upload(f))
             if not created:
                 notes.append(f"«{name}» уже загружен в этого агента — пропущен")
         except ValidationError as e:
             errors.append(f"«{name}»: {e}")
+        except RateLimitedError as e:
+            errors.append(f"«{name}»: лимит загрузок, повторите через {e.retry_after_s} с")
         except NotFoundError as e:
             raise HTTPException(404, "Агент не найден") from e
         finally:
@@ -76,3 +81,26 @@ async def documents_status(
         {"agent_id": agent_id, "docs": docs, "polling": polling},
         status_code=200 if polling else HTMX_STOP_POLLING,
     )
+
+
+@router.post("/agents/{agent_id}/documents/{document_id}/retry", response_class=HTMLResponse)
+async def retry_document(
+    request: Request, agent_id: UUID, document_id: UUID, c: ContainerDep, owner: OwnerDep
+) -> Response:
+    """Повтор из failed; в ответ — таблица целиком: она снова включит polling."""
+    await c.documents.retry(owner, agent_id, document_id)
+    docs = await c.documents.list(owner, agent_id)
+    return templates.TemplateResponse(
+        request,
+        "fragments/documents_table.html",
+        {"agent_id": agent_id, "docs": docs, "polling": has_inflight(docs)},
+    )
+
+
+@router.delete("/agents/{agent_id}/documents/{document_id}", response_class=HTMLResponse)
+async def delete_document(
+    agent_id: UUID, document_id: UUID, c: ContainerDep, owner: OwnerDep
+) -> Response:
+    """Пустой ответ: HTMX удаляет строку (hx-swap="delete")."""
+    await c.documents.delete(owner, agent_id, document_id)
+    return HTMLResponse("")

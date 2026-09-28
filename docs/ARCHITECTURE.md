@@ -223,6 +223,13 @@ sequenceDiagram
 **Решение.** Небольшой модуль `auth`: таблица `users`, argon2id (`pwdlib`), opaque session id в cookie, данные сессии в Redis (`sess:{id}`, TTL 7 дней, sliding), CSRF-токен в сессии, который HTMX передаёт в `hx-headers`. API — ключи `rag_<prefix>_<secret>`, в БД хранятся `prefix` и `sha256(secret)`.
 **Альтернативы.** fastapi-users (с 2024 года в режиме поддержки, без новых фич); JWT в cookie; Starlette `SessionMiddleware` (подписанная cookie без серверного отзыва).
 **Почему.** Нужны ровно логин, логаут и API-ключи — это ~200 строк, полностью под контролем и покрыты тестами. fastapi-users тянет свою модель пользователя и роутеры, заточенные под JSON/JWT, а для серверных HTML-форм с CSRF всё равно пришлось бы писать обвязку. Серверная сессия даёт мгновенный отзыв (logout everywhere), чего JWT не умеет без blacklist.
+**Реализация (итерация 2).** `core/security.py` (argon2id через `pwdlib`, генерация и разбор ключей), `services/sessions.py` (Redis), `services/auth.py`, зависимости `web/deps.py`:
+- `current_principal` — одна точка входа для web и API: сначала `Authorization: Bearer`, затем cookie `rag_sid`. Результат — `Principal(user_id, is_admin, via=session|api_key)`, кэшируется на запрос.
+- CSRF проверяется там же, если запрос пришёл с cookie-сессией и метод небезопасный: заголовок `X-CSRF-Token` (HTMX, `hx-headers` на `<body>`) или скрытое поле `csrf_token` (обычные формы: создание агента, выход). Bearer-запросы освобождены — браузер не подставляет ключ сам.
+- В Redis ключ сессии — `sess:{sha256(id)}`, а не сам id: дамп Redis не даёт готовых cookie. Индекс `usess:{user_id}` → «выйти везде» (вызывается при смене пароля).
+- Неверный email и неверный пароль неразличимы и по тексту, и по времени: для несуществующего email argon2 считается по хэшу-заглушке.
+- `last_used_at` ключа пишется не чаще раза в минуту, чтобы запрос API не превращался в UPDATE.
+- Пароль — только через CLI (`rag-agents user create|set-password`), регистрации в UI нет (SPEC: пользователей заводит администратор).
 
 ### ADR-3. RAG-фреймворк: своё тонкое ядро; LlamaIndex — эталон для сравнения (итерация 6); LangChain не используем
 **Решение.** Пайплайн (парсеры, чанкер, retrieval, контекст, промпт) — свой код за интерфейсами (`Parser`, `Chunker`, `Embedder`, `SparseEncoder`, `VectorIndex`, `Reranker`, `LLMProvider`). LlamaIndex подключается как **эталон для сравнения**: в итерации 6 (обязательной) на том же golden-датасете сравниваются «LlamaIndex из коробки», «LlamaIndex, настроенный вручную» и своё ядро (протокол — §15.3). **Решение ADR-3 пересматривается по итогам этого сравнения**: если LlamaIndex не хуже по качеству при меньшем объёме кода, это фиксируется честно. LangChain в ядре не используется. LangGraph будет рассмотрен для агентного режима, если своего цикла tool-calling станет мало (итерация 8).
@@ -612,9 +619,12 @@ class LLMProvider(Protocol):
 
 | Метод | Путь | Ответ | Примечание |
 |---|---|---|---|
-| GET | `/login` | страница | |
-| POST | `/login` | 303 → `/` | rate limit 5/мин на IP |
-| POST | `/logout` | 303 → `/login` | |
+| GET | `/login?next=…` | страница | `next` — только локальный путь (защита от open redirect) |
+| POST | `/login` | 303 → `next` | rate limit 5/мин на IP; неверные данные → 401 со страницей |
+| POST | `/logout` | 303 → `/login` | CSRF |
+| GET | `/settings/api-keys` | страница ключей | |
+| POST | `/settings/api-keys` | фрагмент: новый ключ (один раз) + таблица | |
+| DELETE | `/settings/api-keys/{key}` | фрагмент таблицы | отзыв |
 | GET | `/` | список агентов | |
 | GET | `/agents/new` | форма | |
 | POST | `/agents` | 303 → `/agents/{id}` | |
@@ -636,7 +646,9 @@ class LLMProvider(Protocol):
 | POST | `/agents/{id}/messages/{mid}/feedback` | фрагмент кнопок 👍/👎 с выбранной | `value=1\|-1`; только завершённый ответ; score в Langfuse (§14.2) |
 | GET | `/agents/{id}/chunks/{chunk_id}` | фрагмент-поповер источника | для `[n]` |
 | GET | `/admin/dlq`, POST `/admin/dlq/{queue}/replay` | страница / 303 | только админ |
-| GET | `/healthz`, `/readyz`, `/metrics` | | `/metrics` — только из docker-сети |
+| GET | `/healthz`, `/readyz`, `/metrics` | | `/metrics` — только из docker-сети (итерация 4) |
+
+Без сессии страница отвечает `303 → /login?next=<путь>`, HTMX-запрос — `401` с `HX-Redirect`. `/system` и всё под ним — только `is_admin` (для остальных 404).
 
 ### 6.2 JSON API `/api/v1` (Bearer API key или сессия)
 
@@ -655,7 +667,14 @@ class LLMProvider(Protocol):
 | POST | `/agents/{id}/reindex` | `202 {index_id}` |
 | POST / GET / DELETE | `/me/api-keys` | ключ показывается один раз |
 
-Ошибки — RFC 9457 `application/problem+json`: `{type, title, status, detail, code}`.
+Ошибки — RFC 9457 `application/problem+json`: `{type, title, status, detail, code}`. `401` — нет или неверный ключ (с `WWW-Authenticate: Bearer`), `404` — нет или чужое, `409` — недопустимо в текущем состоянии, `422` — валидация (`errors[]`), `429` — лимит (`Retry-After`), `502/503` — LLM или retrieval не ответили (`retryable`).
+
+Детали реализации (итерация 2):
+- Роутер `rag_agents.api.v1` в том же приложении (ADR-1). OpenAPI — `/api/v1/openapi.json`, Swagger UI — `/api/docs`; HTML-роуты в схему не попадают.
+- `query`: без `chat_id` открывается **новый** чат (в web `chats/new` продолжает последний). Ответ без стрима — `QueryResponse {chat_id, message_id, result: QueryResult}`; при стриме те же id — в заголовках `X-Chat-Id`, `X-Message-Id`.
+- `DELETE /documents/{doc}` в итерации 2 синхронный: Qdrant → PG (чанки каскадом, `corpus_version += 1`) → файл. Документ в работе → `409`. Асинхронная очистка через статус `deleting` — итерация 3.
+- `DELETE /agents/{id}` — мягкое удаление (`deleted_at`): агент сразу пропадает из всех чтений. Очистка точек Qdrant и файлов — задача итерации 3.
+- `retry` — только из `failed` (иначе `409`), задача публикуется после коммита.
 
 ### 6.3 SSE-протокол
 
@@ -885,7 +904,8 @@ erDiagram
 ```sql
 -- UUID v7 (упорядоченные по времени) генерируются в приложении (uuid-utils)
 CREATE TABLE users (
-  id uuid PRIMARY KEY, email citext UNIQUE NOT NULL, password_hash text NOT NULL,
+  id uuid PRIMARY KEY, email citext UNIQUE NOT NULL,
+  password_hash text,                            -- NULL = вход по паролю невозможен (seed до `user set-password`)
   is_admin boolean NOT NULL DEFAULT false, is_active boolean NOT NULL DEFAULT true,
   created_at timestamptz NOT NULL DEFAULT now()
 );
@@ -1137,8 +1157,8 @@ broker_connection_retry_on_startup = True
 | Эмбеддинг запроса | `emb:{model}:{sha1(q_norm)}` | float16 bytes | 30 д | не нужна |
 | Ответ | `ans:{agent_id}:{corpus_version}:{index_id}:{prompt_v}:{settings_hash}:{sha1(q_norm)}` | `QueryResult` JSON | 7 д | смена `corpus_version`, индекса, промпта или настроек → новый ключ |
 | Retrieval | `ret:{…тот же префикс…}` | список `chunk_id` + скоры | 1 д | как выше. Нужен eval-у и повторным вопросам с другой генерацией |
-| Сессии | `sess:{id}` | user_id, csrf | 7 д sliding | logout |
-| Rate limit | `rl:{user}:{bucket}` | счётчик (sliding window, Lua) | окно | — |
+| Сессии | `sess:{sha256(id)}` + индекс `usess:{user_id}` | `SessionData` (user_id, email, is_admin, csrf) | 7 д sliding (`GETEX`) | logout; смена пароля → все сессии |
+| Rate limit | `rl:{rule}:{subject}` (`questions`/`uploads` — user_id, `login` — IP) | ZSET отметок времени (sliding window log, Lua, время из `TIME` Redis) | окно | — |
 | Circuit breaker | `cb:{provider}` | state, failures, opened_at | — | — |
 
 Кэш ответов применяется только к **первому вопросу чата** (без истории). С историей ответ зависит от контекста, и кэшировать его некорректно.
@@ -1245,7 +1265,7 @@ Docker обходит ufw, поэтому всё служебное публик
 | web (uvicorn) | 448m | 1.5 | 2 воркера (`--workers 2`); BM25-энкодер ~60 МБ на процесс. Токенизатор bge-m3 весит ~240 МБ на процесс: uvicorn `--workers` запускает процессы через `spawn`, CoW не поможет. Если web понадобится считать токены — пересчитать лимит (+~240 МБ × воркеры) |
 | rabbitmq | 384m | 0.5 | `vm_memory_high_watermark.absolute=256MiB` |
 | worker-embed | 256m | 0.5 | `--concurrency=2` (I/O, ждёт Ollama) |
-| redis | 192m | 0.25 | `maxmemory 128mb`, `allkeys-lru` (сессии — в отдельной БД; для них `volatile-lru` при росте) |
+| redis | 192m | 0.25 | `maxmemory 128mb`, `allkeys-lru`. Сессии лежат в той же БД 0 (префикс `sess:`): отдельная БД от вытеснения не спасает — `maxmemory` общий на инстанс. Худший случай — перелогин. Когда появится кэш ответов (итерация 7), переходим на `volatile-lru`: у всех кэш-ключей есть TTL |
 | beat | 128m | 0.1 | — |
 | **Итого** | **≈ 6.6 GiB** | | ~1.2 GiB остаётся ОС, dockerd и page cache, плюс 2 GiB swap |
 
@@ -1272,6 +1292,7 @@ Healthchecks у всех хранилищ. `depends_on: condition: service_healt
 - Контекст через `contextvars`: `request_id` (middleware, заголовок `X-Request-ID`), `user_id`, `agent_id`, `document_id`, `task_id`, `trace_id`. Celery-сигналы `task_prerun/postrun` пробрасывают контекст в воркеры. `request_id` передаётся в заголовках сообщения.
 - Тексты вопросов и чанков в логи не пишем (только длины и хэши). Полный контент — в Langfuse.
 
+- **Сделано в итерации 2:** `web/middleware.py` (чистый ASGI, не `BaseHTTPMiddleware`, чтобы не мешать SSE) берёт `X-Request-ID` из запроса или генерирует, кладёт в contextvars и заголовок ответа, пишет одну строку `http.request` (method, path, status, duration_ms; без `/healthz`, `/readyz`, `/static`). `user_id` добавляет зависимость `current_principal`. Проброс `request_id` в Celery — итерация 3 (вместе с разделением очередей).
 ### 14.2 Трейсы — Langfuse (Cloud, EU)
 Реализовано в мини-итерации 1.5 (решения — ADR-9). Настройки: `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL` (fallback — старое имя `LANGFUSE_HOST`, по умолчанию `https://cloud.langfuse.com`). Если ключей нет, или `APP_ENV=test`, или `LANGFUSE_ENABLED=false`, работает `NoopTracer`.
 
@@ -1281,7 +1302,7 @@ Healthchecks у всех хранилищ. `depends_on: condition: service_healt
 - `qdrant_search` (retriever): input — `agent_id`, коллекция, `top_k`, режим; output — `chunk_id`, `document_id`, `score`, книга и глава каждого хита;
 - `llm_generate` (generation): messages промпта, ответ, `model`, `model_parameters` (temperature, max_tokens, **reasoning_effort**), `usage_details` (`input`, `input_cache_read`, `output`), `completion_start_time` (TTFT), в metadata — `reasoning_tokens`, провайдер. Cost Langfuse считает по model definition;
 - ошибки: `level=ERROR` + `status_message`; закрытие вкладки: `WARNING client_cancelled`;
-- `trace_id` сохраняется в `messages.trace_id`. Ссылка «открыть трейс» в UI для админа появится с auth (итерация 2).
+- `trace_id` сохраняется в `messages.trace_id`. Ссылка «🔎 трейс» под ответом ведёт на `/insights/traces/{id}`; чужой трейс → 404.
 
 **Трейс ingest** `ingest` (одна попытка задачи, `IngestService`): `session_id` = `document-{id}` (ретраи лежат рядом), `user_id` = владелец агента, `tags` = [имя агента, `ingest`]. Span-ы: `parse` → `chunk` → `save_chunks` → `embed_upsert` (внутри по очереди `embed_batch i/n` и `upsert_batch i/n`) → `finalize`. На span-ах только числа: секции, чанки, средние и максимальные токены, размер батча, мс. Output корня: `chunks_total`, `batches`, `embed_ms`, `upsert_ms`, `duration_ms`. **Тексты документов в ingest-трейс не пишем.**
 
@@ -1407,7 +1428,7 @@ Healthchecks у всех хранилищ. `depends_on: condition: service_healt
 - **Изоляция:** `agent_id` в сигнатурах репозиториев и индекса; сервис проверяет `agent.owner_id == current_user.id`; 404 на чужое. Отдельный тестовый модуль `tests/integration/test_isolation.py` обходит все эндпоинты с чужими ID.
 - **Загрузка:** whitelist расширений + magic bytes; лимит размера на уровне чтения стрима; имя файла не используется в путях (`storage_key` из UUID); zip-bomb защита для `.fb2.zip` и epub (лимит распакованного размера 300 МБ и числа файлов). XML-парсинг с `resolve_entities=False, no_network=True` (XXE).
 - **XSS:** Jinja autoescape; markdown ответа → `nh3` с whitelist тегов; SSE `token` — HTML-escape.
-- **CSRF:** токен в сессии, `hx-headers='{"X-CSRF-Token": "…"}'` на `<body>`; проверка для POST, PUT, PATCH, DELETE в web-роутере. API с Bearer от CSRF освобождён.
+- **CSRF:** токен в сессии, `hx-headers='{"X-CSRF-Token": "…"}'` на `<body>` (и скрытое поле `csrf_token` в обычных формах); проверка для POST, PUT, PATCH, DELETE у любого запроса с cookie-сессией — и в web, и в API. Запросы с Bearer от CSRF освобождены. Форма входа токена не требует (сессии ещё нет); от подбора пароля — rate limit на IP.
 - **Промпт-инъекции из документов:** источники в `<source>`-тегах, правило 5 в `BASE_RULES`, экранирование `<`/`>` внутри текста источников. Eval-набор `injection` (5 документов с «Игнорируй инструкции…») проверяет, что агент не выполняет команды из источников.
 - **Персона** — пользовательский ввод: ограничение длины, помещается в `<persona>` после правил, с явным приоритетом правил.
 - **Секреты:** `.env` (в `.gitignore`), `.env.example` в репо; `pydantic-settings` с `SecretStr`.

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}API-ключи · RAG-агенты{% endblock %}
+{% block content %}
+<h1 class="h3 mb-1">API-ключи</h1>
+<p class="text-secondary">
+  Ключ даёт доступ к JSON API от вашего имени: <code>Authorization: Bearer rag_…</code>.
+  Документация — <a href="/api/docs">/api/docs</a>.
+</p>
+<form class="row g-2 mb-4 col-lg-8" hx-post="/settings/api-keys" hx-target="#api-keys" hx-swap="innerHTML"
+      hx-on::after-request="if (event.detail.successful) this.reset()">
+  <div class="col"><input class="form-control" name="name" required maxlength="80" placeholder="Название, например «ноутбук»"></div>
+  <div class="col-auto"><button class="btn btn-primary" type="submit">Выпустить ключ</button></div>
+</form>
+<div id="api-keys">{% include "fragments/api_keys_panel.html" %}</div>
+{% endblock %}

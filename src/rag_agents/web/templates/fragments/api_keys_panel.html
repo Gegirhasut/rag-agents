@@ -1,0 +1,30 @@
+{% if error %}<div class="alert alert-danger py-2">{{ error }}</div>{% endif %}
+{% if issued %}
+<div class="alert alert-success">
+  <div class="mb-1">Ключ «{{ issued.name }}» выпущен. Скопируйте его сейчас — больше он показан не будет:</div>
+  <code class="user-select-all d-block text-break">{{ issued.token }}</code>
+</div>
+{% endif %}
+{% if keys %}
+<table class="table table-sm align-middle">
+  <thead><tr><th>Название</th><th>Префикс</th><th>Создан</th><th>Последнее использование</th><th></th></tr></thead>
+  <tbody>
+  {% for k in keys %}
+    <tr class="{{ '' if k.active else 'text-secondary' }}">
+      <td>{{ k.name }}</td>
+      <td><code>rag_{{ k.prefix }}_…</code></td>
+      <td class="small">{{ k.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+      <td class="small">{{ k.last_used_at.strftime('%Y-%m-%d %H:%M') if k.last_used_at else '—' }}</td>
+      <td class="text-end">
+        {% if k.active %}
+        <button class="btn btn-sm btn-outline-danger" hx-delete="/settings/api-keys/{{ k.id }}"
+                hx-target="#api-keys" hx-confirm="Отозвать ключ «{{ k.name }}»? Скрипты с ним перестанут работать.">Отозвать</button>
+        {% else %}<span class="badge text-bg-secondary">отозван {{ k.revoked_at.strftime('%Y-%m-%d') }}</span>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-secondary small">Ключей пока нет.</p>
+{% endif %}

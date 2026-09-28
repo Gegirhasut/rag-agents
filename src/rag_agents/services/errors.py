@@ -4,3 +4,7 @@ class NotFoundError(Exception):
 
 class ValidationError(Exception):
     """Некорректный ввод пользователя (наружу — 400/422 с текстом)."""
+
+
+class ConflictError(Exception):
+    """Операция недопустима в текущем состоянии (наружу — 409)."""

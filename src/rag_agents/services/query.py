@@ -46,6 +46,12 @@ log = structlog.get_logger()
 _TITLE_CHARS = 80
 
 
+class AnswerFailedError(Exception):
+    def __init__(self, event: ErrorEvent) -> None:
+        super().__init__(event.message)
+        self.event = event
+
+
 def _ms(since: float) -> int:
     return int((time.monotonic() - since) * 1000)
 
@@ -87,9 +93,18 @@ class QueryService:
             return await repo.list_messages(chat.id) if chat else []
 
     async def ask(
-        self, owner_id: UUID, agent_id: UUID, chat_id: UUID | None, question: str
+        self,
+        owner_id: UUID,
+        agent_id: UUID,
+        chat_id: UUID | None,
+        question: str,
+        *,
+        new_chat: bool = False,
     ) -> MessagePair:
-        """Создаёт вопрос и пустой ответ (pending). Генерация стартует при подключении к стриму."""
+        """Создаёт вопрос и пустой ответ (pending). Генерация стартует при подключении к стриму.
+
+        Без chat_id web продолжает последний чат агента, а API (new_chat=True) открывает новый.
+        """
         agent = await self._agent(owner_id, agent_id)
         await self.trace.emit(
             "query.ask",
@@ -103,6 +118,8 @@ class QueryService:
             chat = (
                 await repo.get_chat(agent_id, owner_id, chat_id)
                 if chat_id
+                else None
+                if new_chat
                 else await repo.latest_chat(agent_id, owner_id)
             )
             if chat_id and chat is None:
@@ -144,6 +161,18 @@ class QueryService:
         if not claimed:
             return self._replay(msg)
         return self._generate(agent, owner_id, msg.chat_id, message_id, question or "")
+
+    async def answer(self, owner_id: UUID, agent_id: UUID, message_id: UUID) -> QueryResult:
+        """Ответ без стрима (JSON API): тот же конвейер, события собираются до done."""
+        async for ev in await self.stream_answer(owner_id, agent_id, message_id):
+            match ev:
+                case DoneEvent():
+                    return ev.result
+                case ErrorEvent():
+                    raise AnswerFailedError(ev)
+        raise AnswerFailedError(  # pragma: no cover — генератор всегда завершается done/error
+            ErrorEvent(code="no_result", message="Ответ не получен", retryable=True)
+        )
 
     async def _replay(self, msg: MessageOut) -> AsyncIterator[StreamEvent]:
         """Повторное подключение EventSource: генерацию заново не запускаем (ARCHITECTURE §6.3)."""

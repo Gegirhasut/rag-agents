@@ -56,8 +56,20 @@ class Settings(BaseSettings):
 
     seed_user_email: str = "owner@local"
 
-    # Живые события пайплайна для страницы /system (Redis pub/sub). В проде — выключить
-    # или закрыть админ-доступом (итерация 2): на странице видны скоры и метаданные книг.
+    # Auth (ARCHITECTURE ADR-2): серверные сессии в Redis, cookie без данных — только id
+    session_cookie: str = "rag_sid"
+    session_ttl_s: int = 7 * 24 * 3600
+    # Secure-cookie только за TLS; в dev UI открывается по http://192.168.56.10:8080
+    session_cookie_secure: bool = False
+
+    # Rate limit (FR-6.3), sliding window в Redis
+    rate_limit_enabled: bool = True
+    rl_questions_per_min: int = 20
+    rl_uploads_per_hour: int = 30
+    rl_login_per_min: int = 5
+
+    # Живые события пайплайна для страницы /system (Redis pub/sub). Страница доступна только
+    # администраторам: в событиях видны скоры и метаданные книг всех пользователей.
     trace_enabled: bool = True
 
     # Langfuse Cloud (EU). Без обоих ключей трейсинг выключен (no-op). LANGFUSE_HOST — старое

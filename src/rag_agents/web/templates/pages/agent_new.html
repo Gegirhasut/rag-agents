@@ -3,6 +3,7 @@
 <h1 class="h3 mb-3">Новый агент</h1>
 {% for e in errors %}<div class="alert alert-danger py-2">{{ e }}</div>{% endfor %}
 <form method="post" action="/agents" class="col-lg-8">
+  <input type="hidden" name="csrf_token" value="{{ request.state.principal.csrf_token }}">
   <div class="mb-3">
     <label class="form-label" for="name">Название</label>
     <input class="form-control" id="name" name="name" required maxlength="120"

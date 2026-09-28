@@ -1,21 +1,25 @@
 """Изоляция данных агентов (SPEC NFR «Изоляция»): ни один путь чтения не видит чужое."""
 
 import hashlib
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 from qdrant_client import AsyncQdrantClient
 
 from rag_agents.core.db import Database
-from rag_agents.domain.agents import AgentOut, AgentSettings
+from rag_agents.domain.agents import AgentCreate, AgentOut, AgentSettings
 from rag_agents.domain.documents import ChunkPayload
 from rag_agents.domain.enums import MessageRole, MessageStatus
 from rag_agents.rag.index.qdrant import QdrantChunkIndex, chunk_point_id, collection_name
-from rag_agents.repositories.agents import AgentRepository, UserRepository
+from rag_agents.repositories.agents import AgentRepository
 from rag_agents.repositories.chats import ChatRepository
 from rag_agents.repositories.documents import DocumentRepository
 from rag_agents.repositories.insights import InsightsRepository
+from rag_agents.repositories.users import UserRepository
+from tests.integration.conftest import Session, Stack
 
 pytestmark = pytest.mark.integration
 DIM = 4
@@ -256,3 +260,192 @@ async def test_insights_facts_are_scoped_to_owner(db: Database) -> None:
         assert d.timings == {"parse_ms": 12, "embed_ms": 3400}
         assert await repo.answers(bob.owner_id, since) == []
         assert await repo.documents(bob.owner_id, since) == []
+
+
+# --- HTTP: обход всех эндпоинтов с чужими ID (CLAUDE.md: новые эндпоинты добавляются сюда) ---
+
+# (метод, путь, канал). Плейсхолдеры подставляются ID данных Алисы; запрос делает Боб
+# (админ — чтобы /system не отсекался раньше проверки владельца).
+FOREIGN_CASES: list[tuple[str, str, str]] = [
+    ("GET", "/agents/{agent}", "web"),
+    ("POST", "/agents/{agent}/documents", "web"),
+    ("GET", "/agents/{agent}/documents/status", "web"),
+    ("POST", "/agents/{agent}/documents/{doc}/retry", "web"),
+    ("DELETE", "/agents/{agent}/documents/{doc}", "web"),
+    ("POST", "/agents/{agent}/chats/new/messages", "web"),
+    ("POST", "/agents/{agent}/chats/{chat}/messages", "web"),
+    ("GET", "/agents/{agent}/messages/{msg}/stream", "web"),
+    ("POST", "/agents/{agent}/messages/{msg}/feedback", "web"),
+    ("GET", "/system/agents/{agent}/vector-map", "web"),
+    ("GET", "/system/agents/{agent}/points/{point}", "web"),
+    ("DELETE", "/settings/api-keys/{key}", "web"),
+    ("GET", "/api/v1/agents/{agent}", "api"),
+    ("PATCH", "/api/v1/agents/{agent}", "api"),
+    ("DELETE", "/api/v1/agents/{agent}", "api"),
+    ("POST", "/api/v1/agents/{agent}/documents", "api"),
+    ("GET", "/api/v1/agents/{agent}/documents", "api"),
+    ("GET", "/api/v1/agents/{agent}/documents/{doc}", "api"),
+    ("POST", "/api/v1/agents/{agent}/documents/{doc}/retry", "api"),
+    ("DELETE", "/api/v1/agents/{agent}/documents/{doc}", "api"),
+    ("POST", "/api/v1/agents/{agent}/query", "api"),
+    ("DELETE", "/api/v1/me/api-keys/{key}", "api"),
+]
+# Эндпоинты с параметром пути, которые здесь не обходятся, и почему
+EXEMPT = {
+    # Трейсы живут в Langfuse (в тестах выключен); чужой трейс → 404 проверяет
+    # tests/unit/test_insights.py::test_foreign_trace_is_not_found_even_from_cache
+    ("GET", "/insights/traces/{trace_id}"),
+    ("GET", "/insights/sessions/{session_id}"),
+}
+_PLACEHOLDER_NAMES = {
+    "agent_id": "agent",
+    "document_id": "doc",
+    "chat_ref": "chat",
+    "message_id": "msg",
+    "point_id": "point",
+    "key_id": "key",
+}
+
+
+def _declared_routes() -> set[tuple[str, str]]:
+    """Все роуты с параметрами пути из листовых роутеров (web + API)."""
+    from fastapi.routing import APIRoute  # noqa: PLC0415
+
+    from rag_agents.api.v1 import agents as api_agents  # noqa: PLC0415
+    from rag_agents.api.v1 import documents as api_documents  # noqa: PLC0415
+    from rag_agents.api.v1 import keys as api_keys  # noqa: PLC0415
+    from rag_agents.api.v1 import query as api_query  # noqa: PLC0415
+    from rag_agents.web.routes import (  # noqa: PLC0415
+        auth,
+        chat,
+        documents,
+        insights,
+        pages,
+        system,
+    )
+
+    web = [auth, chat, documents, insights, pages, system]
+    api = [api_agents, api_documents, api_keys, api_query]
+    out: set[tuple[str, str]] = set()
+    for prefix, modules in (("", web), ("/api/v1", api)):
+        for m in modules:
+            for r in m.router.routes:
+                if isinstance(r, APIRoute) and "{" in r.path:
+                    out |= {(method, prefix + r.path) for method in r.methods}
+    return out
+
+
+def _normalize(path: str) -> str:
+    for param, short in _PLACEHOLDER_NAMES.items():
+        path = path.replace("{" + short + "}", "{" + param + "}")
+    return path.replace("/chats/new/", "/chats/{chat_ref}/")
+
+
+def test_every_parametrized_endpoint_is_walked() -> None:
+    covered = {(m, _normalize(p)) for m, p, _ in FOREIGN_CASES} | EXEMPT
+    missing = _declared_routes() - covered
+    assert not missing, f"добавьте в FOREIGN_CASES: {sorted(missing)}"
+
+
+@pytest.fixture(scope="module")
+async def alice_data(stack: Stack) -> dict[str, str]:
+    c = stack.container
+    alice = await stack.user(admin=True)  # чтобы контроль владельца прошёл и через /system
+    agent = await c.agents.create(alice.id, AgentCreate(name="Алиса"))
+    doc, _ = await c.documents.upload(alice.id, agent.id, "a.txt", _bytes("секрет Алисы"))
+    pair = await c.query.ask(alice.id, agent.id, None, "Что там?")
+    key = await c.auth.issue_key(alice.id, "alice")
+    return {
+        "user": str(alice.id),
+        "email": alice.email,
+        "token": key.token,
+        "agent": str(agent.id),
+        "doc": str(doc.id),
+        "chat": str(pair.answer.chat_id),
+        "msg": str(pair.answer.id),
+        "point": str(uuid4()),
+        "key": str(key.id),
+    }
+
+
+@pytest.fixture(scope="module")
+async def bob(stack: Stack) -> AsyncIterator[tuple[Session, dict[str, str]]]:
+    user = await stack.user(admin=True)
+    session = Session(stack)
+    await session.login(user.email)
+    key = await stack.container.auth.issue_key(user.id, "bob")
+    yield session, {"Authorization": f"Bearer {key.token}"}
+    await session.aclose()
+
+
+def _bytes(text: str) -> AsyncIterator[bytes]:
+    async def gen() -> AsyncIterator[bytes]:
+        yield text.encode()
+
+    return gen()
+
+
+def _request_kwargs(method: str, path: str) -> dict[str, Any]:
+    if path.endswith("/documents") and method == "POST":
+        return {"files": {"files": ("b.txt", b"bob", "text/plain")}}
+    if path.endswith("/messages"):
+        return {"data": {"question": "Покажи чужое"}}
+    if path.endswith("/feedback"):
+        return {"data": {"value": "1"}}
+    if path.endswith("/query"):
+        return {"json": {"question": "Покажи чужое"}}
+    if method == "PATCH":
+        return {"json": {"name": "взлом"}}
+    return {}
+
+
+@pytest.mark.parametrize(("method", "path", "channel"), FOREIGN_CASES)
+async def test_foreign_ids_are_not_found(
+    stack: Stack,
+    alice_data: dict[str, str],
+    bob: tuple[Session, dict[str, str]],
+    method: str,
+    path: str,
+    channel: str,
+) -> None:
+    session, bearer = bob
+    url = path.format(**alice_data)
+    kwargs = _request_kwargs(method, path)
+    if channel == "web":
+        r = await session.http.request(method, url, headers=session.hx(), **kwargs)
+    else:
+        r = await stack.client.request(method, url, headers=bearer, **kwargs)
+    assert r.status_code == 404, f"{method} {url} → {r.status_code}: {r.text[:200]}"
+    if channel == "api":
+        assert r.headers["content-type"] == "application/problem+json"
+
+
+async def test_owner_reaches_same_endpoints(stack: Stack, alice_data: dict[str, str]) -> None:
+    """Контроль: 404 выше — из-за владельца, а не из-за опечатки в пути."""
+    session = Session(stack)
+    await session.login(alice_data["email"])
+    bearer = {"Authorization": f"Bearer {alice_data['token']}"}
+    try:
+        for method, path, channel in FOREIGN_CASES:
+            if method != "GET" or "{point}" in path or "/stream" in path:
+                continue
+            url = path.format(**alice_data)
+            if channel == "web":
+                r = await session.http.get(url, headers=session.hx())
+            else:
+                r = await stack.client.get(url, headers=bearer)
+            assert r.status_code == 200, f"{url} → {r.status_code}"
+    finally:
+        await session.aclose()
+
+
+async def test_alice_data_survives_bobs_attempts(stack: Stack, alice_data: dict[str, str]) -> None:
+    """После обхода (порядок тестов модуля) данные Алисы на месте и без изменений."""
+    c = stack.container
+    alice, agent_id = UUID(alice_data["user"]), UUID(alice_data["agent"])
+    agent = await c.agents.get(alice, agent_id)
+    assert agent.name == "Алиса"
+    docs = await c.documents.list(alice, agent_id)
+    assert [str(d.id) for d in docs] == [alice_data["doc"]]
+    [key] = await c.auth.list_keys(alice)
+    assert key.revoked_at is None

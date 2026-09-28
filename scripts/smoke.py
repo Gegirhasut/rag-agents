@@ -1,13 +1,14 @@
 """E2E smoke по живому стенду (критерии итерации 1, docs/PLAN.md).
 
-Создаёт агента → загружает txt → ждёт done → задаёт вопрос → читает SSE-стрим.
-Использует те же HTML/HTMX-эндпоинты, что и браузер.
+Логин → агент → загрузка txt → ждёт done → вопрос → SSE-стрим (те же HTML/HTMX-эндпоинты,
+что и браузер) → API-ключ → тот же вопрос через JSON API со стримом (критерии итерации 2).
 
     uv run python scripts/smoke.py [--base http://localhost:8080] [--file path.txt]
 """
 
 import argparse
 import html
+import json
 import os
 import re
 import sys
@@ -15,6 +16,7 @@ import time
 from pathlib import Path
 
 import httpx
+from web_session import login
 
 DEFAULT_FILE = Path("data/samples/Л. Н. Толстой - Исповедь.txt")
 QUESTION = "В чём смысл жизни?"
@@ -47,6 +49,12 @@ def main() -> None:
     print(f"readyz: {ready}")
     if not ready["ready"]:
         fail("стенд не готов")
+
+    anon = c.get("/")
+    if anon.status_code != 303 or not anon.headers["location"].startswith("/login"):
+        fail(f"без входа / должен вести на /login, а не HTTP {anon.status_code}")
+    login(c)
+    print("вход: сессия и CSRF-токен получены")
 
     name = f"Smoke {time.strftime('%H:%M:%S')}"
     r = c.post("/agents", data={"name": name, "description": "e2e smoke"})
@@ -154,7 +162,34 @@ def main() -> None:
     if 'class="answer-body"' not in r.text:
         fail("повторное подключение к стриму не вернуло готовый ответ")
     print("повторное подключение: отдан сохранённый ответ, генерация не перезапускалась")
+
+    api_stream(c, agent_path.rsplit("/", 1)[1], args.question)
     print("OK")
+
+
+def api_stream(c: httpx.Client, agent_id: str, question: str) -> None:
+    """JSON API с Bearer-ключом: SSE-события с JSON в data (ARCHITECTURE §6.3)."""
+    r = c.post("/settings/api-keys", data={"name": "smoke"}, headers={"HX-Request": "true"})
+    m = re.search(r"(rag_[0-9a-f]{8}_[A-Za-z0-9_-]+)", r.text)
+    if not m:
+        fail(f"выпуск API-ключа: HTTP {r.status_code}")
+    api = httpx.Client(
+        base_url=c.base_url,
+        headers={"Authorization": f"Bearer {m.group(1)}"},
+        timeout=httpx.Timeout(120, connect=5),
+    )
+    if api.get(f"/api/v1/agents/{agent_id}").status_code != 200:
+        fail("API: агент по ключу не читается")
+    types: list[str] = []
+    with api.stream(
+        "POST", f"/api/v1/agents/{agent_id}/query", json={"question": question, "stream": True}
+    ) as resp:
+        for line in resp.iter_lines():
+            if line.startswith("data: "):
+                types.append(json.loads(line[6:])["type"])
+    if not types or types[-1] != "done" or "token" not in types:
+        fail(f"API-стрим: события {types[:5]}…")
+    print(f"API: Bearer-ключ, JSON-события {dict((t, types.count(t)) for t in set(types))}")
 
 
 if __name__ == "__main__":

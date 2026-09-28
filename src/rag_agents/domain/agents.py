@@ -32,6 +32,21 @@ class AgentCreate(BaseModel):
     ) = None
 
 
+class AgentUpdate(BaseModel):
+    """PATCH: переданные поля меняются, отсутствующие — нет (model_fields_set)."""
+
+    name: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
+        | None
+    ) = None
+    description: (
+        Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)] | None
+    ) = None
+    persona_prompt: (
+        Annotated[str, StringConstraints(strip_whitespace=True, max_length=4000)] | None
+    ) = None
+
+
 class AgentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

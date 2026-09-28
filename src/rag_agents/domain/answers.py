@@ -1,7 +1,7 @@
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 from rag_agents.domain.documents import ChunkPayload
 
@@ -64,7 +64,21 @@ class QueryResult(BaseModel):
 
 
 class QueryRequest(BaseModel):
-    question: str = Field(min_length=2, max_length=2000)
+    """Тело POST /api/v1/agents/{id}/query. Без chat_id вопрос открывает новый чат."""
+
+    question: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=2, max_length=2000)
+    ]
+    chat_id: UUID | None = None
+    stream: bool = False
+
+
+class QueryResponse(BaseModel):
+    """Ответ JSON API без стрима: результат + где он сохранён (продолжить чат по chat_id)."""
+
+    chat_id: UUID
+    message_id: UUID
+    result: QueryResult
 
 
 class TokenEvent(BaseModel):

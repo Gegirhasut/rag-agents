@@ -7,7 +7,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from rag_agents.domain.agents import AgentCreate
 from rag_agents.services.errors import NotFoundError
-from rag_agents.web.deps import ContainerDep, OwnerDep
+from rag_agents.web.deps import ContainerDep, OwnerDep, PrincipalDep
 from rag_agents.web.routes.documents import has_inflight
 from rag_agents.web.templating import templates
 
@@ -21,7 +21,7 @@ async def agents_list(request: Request, c: ContainerDep, owner: OwnerDep) -> Res
 
 
 @router.get("/agents/new", response_class=HTMLResponse)
-async def agent_new(request: Request) -> Response:
+async def agent_new(request: Request, _: PrincipalDep) -> Response:
     return templates.TemplateResponse(request, "pages/agent_new.html", {"errors": [], "form": {}})
 
 

@@ -25,7 +25,7 @@ def _unavailable(request: Request, error: str | None = None) -> Response:
 
 @router.get("", response_class=HTMLResponse)
 async def insights_page(
-    request: Request, c: ContainerDep, period: PeriodQuery = Period.DAY
+    request: Request, c: ContainerDep, _: OwnerDep, period: PeriodQuery = Period.DAY
 ) -> Response:
     return templates.TemplateResponse(
         request,

@@ -29,6 +29,7 @@ dependencies = [
     "numpy>=2.0",
     "langfuse>=4.15",
     "pyyaml>=6.0",
+    "pwdlib[argon2]>=0.2",
 ]
 
 [dependency-groups]
@@ -99,7 +100,7 @@ root_package = "rag_agents"
 name = "Web/API do not touch storage or RAG internals directly"
 type = "forbidden"
 allow_indirect_imports = true
-source_modules = ["rag_agents.web"]
+source_modules = ["rag_agents.web", "rag_agents.api"]
 forbidden_modules = ["rag_agents.repositories", "rag_agents.models", "rag_agents.rag", "rag_agents.llm"]
 
 [[tool.importlinter.contracts]]

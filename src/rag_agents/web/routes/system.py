@@ -3,17 +3,18 @@
 from collections.abc import AsyncIterator
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from rag_agents.domain.system import SystemSnapshot
 from rag_agents.services.errors import NotFoundError
-from rag_agents.web.deps import ContainerDep, OwnerDep
+from rag_agents.web.deps import ContainerDep, OwnerDep, require_admin
 from rag_agents.web.sse import format_sse, with_heartbeat
 from rag_agents.web.system_catalog import EDGES, LIBS, NODE_H, NODE_W, NODES
 from rag_agents.web.templating import templates
 
-router = APIRouter(prefix="/system")
+# Только администраторы: живые события пайплайна (/system/events) общие для всех пользователей
+router = APIRouter(prefix="/system", dependencies=[Depends(require_admin)])
 
 
 def _badges(s: SystemSnapshot) -> dict[str, str]:

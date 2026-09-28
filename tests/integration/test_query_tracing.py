@@ -13,39 +13,18 @@ from rag_agents.core.db import Database
 from rag_agents.domain.agents import AgentOut, AgentSettings
 from rag_agents.domain.answers import DoneEvent, StreamEvent
 from rag_agents.domain.documents import ChunkPayload
-from rag_agents.llm.base import LLMChunk, LLMRequest, LLMUsage
 from rag_agents.llm.prices import PriceTable
 from rag_agents.rag.index.qdrant import QdrantChunkIndex, chunk_point_id, collection_name
-from rag_agents.repositories.agents import AgentRepository, UserRepository
+from rag_agents.repositories.agents import AgentRepository
 from rag_agents.repositories.chats import ChatRepository
+from rag_agents.repositories.users import UserRepository
 from rag_agents.services.errors import NotFoundError
 from rag_agents.services.query import QueryService
 from rag_agents.services.trace import TraceBus
-from tests.fakes import RecordingTracer
+from tests.fakes import VECTOR, FakeEmbedder, FakeLLM, RecordingTracer
 
 pytestmark = pytest.mark.integration
 DIM = 4
-VECTOR = [0.5, 0.5, 0.5, 0.5]
-
-
-class FakeEmbedder:
-    model = "fake-embed"
-    dim = DIM
-
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        return [VECTOR for _ in texts]
-
-
-class FakeLLM:
-    name = "deepseek"
-    model = "deepseek-flash"
-    reasoning_effort: str | None = "low"
-
-    async def stream(self, req: LLMRequest) -> AsyncIterator[LLMChunk]:
-        for delta in ("Смысл ", "жизни [1]."):
-            yield LLMChunk(delta=delta)
-        usage = LLMUsage(input_tokens=100, cached_input_tokens=40, output_tokens=30)
-        yield LLMChunk(finish_reason="stop", usage=usage)
 
 
 async def _agent_with_chunk(

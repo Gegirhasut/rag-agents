@@ -1,8 +1,9 @@
+{% set aid = agent_id if agent_id is defined else agent.id %}
 <div id="docs-table"
-     {% if polling %}hx-get="/agents/{{ agent_id if agent_id is defined else agent.id }}/documents/status" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+     {% if polling %}hx-get="/agents/{{ aid }}/documents/status" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
 {% if docs %}
 <table class="table table-sm align-middle">
-  <thead><tr><th>Файл</th><th class="text-end">Размер</th><th>Статус</th></tr></thead>
+  <thead><tr><th>Файл</th><th class="text-end">Размер</th><th>Статус</th><th></th></tr></thead>
   <tbody>
   {% for d in docs %}
     <tr id="doc-{{ d.id }}">
@@ -22,6 +23,17 @@
           </div>
         {% else %}
           <span class="badge text-bg-secondary">{{ d.status.value }}</span>
+        {% endif %}
+      </td>
+      <td class="text-end text-nowrap">
+        {% if d.status.value == 'failed' %}
+        <button class="btn btn-sm btn-outline-primary" title="Обработать заново"
+                hx-post="/agents/{{ aid }}/documents/{{ d.id }}/retry" hx-target="#docs-table" hx-swap="outerHTML">↻</button>
+        {% endif %}
+        {% if d.status.is_terminal %}
+        <button class="btn btn-sm btn-outline-danger" title="Удалить документ"
+                hx-delete="/agents/{{ aid }}/documents/{{ d.id }}" hx-target="closest tr" hx-swap="delete"
+                hx-confirm="Удалить «{{ d.title or d.filename }}» и его фрагменты из индекса?">✕</button>
         {% endif %}
       </td>
     </tr>

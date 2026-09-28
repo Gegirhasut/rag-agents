@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
+from web_session import login
 
 SAMPLES = Path("data/samples")
 INGEST_TIMEOUT_S = 600
@@ -148,6 +149,7 @@ def main() -> None:
     c = httpx.Client(base_url=args.base, timeout=httpx.Timeout(180, connect=5))
     if not c.get("/readyz").json()["ready"]:
         sys.exit("FAIL: стенд не готов (/readyz)")
+    login(c)
 
     stamp = time.strftime("%d.%m %H:%M")
     tolstoy = create_agent(c, f"Толстой: Исповедь (демо {stamp})", "Полный текст «Исповеди»")

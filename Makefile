@@ -3,7 +3,7 @@ UV ?= $(shell command -v uv 2>/dev/null || echo $(HOME)/.local/bin/uv)
 COMPOSE := docker compose
 TEST_COMPOSE := docker compose -f compose.test.yaml
 TEST_ENV := DATABASE_URL=postgresql+asyncpg://rag_test:rag_test@127.0.0.1:15432/rag_test \
-            QDRANT_URL=http://127.0.0.1:16333 APP_ENV=test
+            QDRANT_URL=http://127.0.0.1:16333 REDIS_URL=redis://127.0.0.1:16379/0 APP_ENV=test
 
 .PHONY: help up up-debug down build logs ps migrate seed sh lint fmt test test-unit test-integration test-up test-down smoke demo-traffic langfuse-check langfuse-model langfuse-trace
 
@@ -32,7 +32,7 @@ ps: ## состояние сервисов и память
 migrate: ## alembic upgrade head
 	$(COMPOSE) run --rm migrate
 
-seed: ## seed-пользователь (владелец агентов до итерации 2)
+seed: ## seed-администратор SEED_USER_EMAIL с паролем SEED_USER_PASSWORD из .env
 	$(COMPOSE) exec web rag-agents seed
 
 sh: ## shell в контейнере web

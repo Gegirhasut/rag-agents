@@ -1,3 +1,4 @@
+import builtins
 from collections.abc import AsyncIterator
 from pathlib import PurePath
 from typing import Protocol
@@ -11,11 +12,12 @@ from rag_agents.core.db import Database
 from rag_agents.core.ids import uuid7
 from rag_agents.core.storage import FileTooLargeError, LocalFileStorage
 from rag_agents.domain.documents import DocumentOut
-from rag_agents.domain.enums import SourceFormat
+from rag_agents.domain.enums import DocumentStatus, SourceFormat
 from rag_agents.domain.tasks import IngestDocumentTask
+from rag_agents.rag.index.qdrant import QdrantChunkIndex
 from rag_agents.repositories.agents import AgentRepository
 from rag_agents.repositories.documents import DocumentRepository
-from rag_agents.services.errors import NotFoundError, ValidationError
+from rag_agents.services.errors import ConflictError, NotFoundError, ValidationError
 from rag_agents.services.progress import ProgressStore
 from rag_agents.services.trace import TraceBus
 
@@ -50,8 +52,10 @@ class DocumentService:
         publisher: TaskPublisher,
         trace: TraceBus,
         settings: Settings,
+        index: QdrantChunkIndex,
     ) -> None:
         self.db = db
+        self.index = index
         self.storage = storage
         self.progress = progress
         self.publisher = publisher
@@ -140,13 +144,82 @@ class DocumentService:
             log.info("document.queued", agent_id=str(agent_id), document_id=str(doc.id))
         return doc, created
 
-    async def list(self, owner_id: UUID, agent_id: UUID) -> list[DocumentOut]:
+    async def list(
+        self, owner_id: UUID, agent_id: UUID, status: DocumentStatus | None = None
+    ) -> list[DocumentOut]:
+        """Статусы — из PG одним запросом, прогресс в работе — из Redis (ARCHITECTURE §6.4)."""
         async with self.db.session() as s:
             if await AgentRepository(s).get(owner_id, agent_id) is None:
                 raise NotFoundError("agent")
             docs = await DocumentRepository(s).list_for_agent(agent_id)
+        if status is not None:
+            docs = [d for d in docs if d.status == status]
+        return await self._with_progress(docs)
+
+    async def get(self, owner_id: UUID, agent_id: UUID, document_id: UUID) -> DocumentOut:
+        async with self.db.session() as s:
+            if await AgentRepository(s).get(owner_id, agent_id) is None:
+                raise NotFoundError("agent")
+            doc = await DocumentRepository(s).get(agent_id, document_id)
+        if doc is None:
+            raise NotFoundError("document")
+        [doc] = await self._with_progress([doc])
+        return doc
+
+    async def _with_progress(self, docs: builtins.list[DocumentOut]) -> builtins.list[DocumentOut]:
         hot = await self.progress.get_many([d.id for d in docs if not d.status.is_terminal])
         return [
             d.model_copy(update={"progress": 100 if d.status.is_terminal else hot.get(d.id, 0)})
             for d in docs
         ]
+
+    async def retry(self, owner_id: UUID, agent_id: UUID, document_id: UUID) -> DocumentOut:
+        """Повтор обработки только из failed: задача публикуется после коммита."""
+        async with self.db.uow() as uow:
+            agent = await AgentRepository(uow.session).get(owner_id, agent_id)
+            if agent is None or agent.active_index_id is None:
+                raise NotFoundError("agent")
+            repo = DocumentRepository(uow.session)
+            doc = await repo.reset_failed(agent_id, document_id)
+            if doc is None:
+                if await repo.get(agent_id, document_id) is None:
+                    raise NotFoundError("document")
+                raise ConflictError("Повторить можно только документ в статусе failed")
+            task = IngestDocumentTask(document_id=doc.id, index_id=agent.active_index_id)
+            uow.on_commit(lambda: anyio.to_thread.run_sync(self.publisher.publish_ingest, task))
+            await uow.commit()
+        log.info("document.retry", agent_id=str(agent_id), document_id=str(document_id))
+        return doc
+
+    async def delete(self, owner_id: UUID, agent_id: UUID, document_id: UUID) -> None:
+        """Синхронное удаление документа в конечном статусе: точки Qdrant → строка PG
+        (чанки каскадом) → файл. corpus_version растёт: кэши ответов станут невалидны.
+
+        Документ в работе удалять нельзя (409): воркер допишет точки после удаления.
+        Асинхронное удаление через статус deleting — итерация 3.
+        """
+        async with self.db.session() as s:
+            agents = AgentRepository(s)
+            agent = await agents.get(owner_id, agent_id)
+            if agent is None:
+                raise NotFoundError("agent")
+            doc = await DocumentRepository(s).get(agent_id, document_id)
+            if doc is None:
+                raise NotFoundError("document")
+            if not doc.status.is_terminal:
+                raise ConflictError("Документ ещё обрабатывается — удалить можно после завершения")
+            idx = (
+                await agents.get_index(agent_id, agent.active_index_id)
+                if agent.active_index_id
+                else None
+            )
+        if idx is not None:
+            # Сначала Qdrant: если он недоступен, документ остаётся целым, можно повторить
+            await self.index.delete_document(idx.collection, agent_id, document_id)
+        async with self.db.uow() as uow:
+            if not await DocumentRepository(uow.session).delete_terminal(agent_id, document_id):
+                raise ConflictError("Статус документа изменился, повторите")
+            await AgentRepository(uow.session).bump_corpus_version(agent_id)
+            await uow.commit()
+        await self.storage.delete(doc.storage_key)
+        log.info("document.deleted", agent_id=str(agent_id), document_id=str(document_id))

@@ -15,6 +15,7 @@ from rag_agents.domain.answers import (
     TokenEvent,
 )
 from rag_agents.services.errors import NotFoundError
+from rag_agents.services.ratelimit import Rule
 from rag_agents.web.deps import ContainerDep, OwnerDep
 from rag_agents.web.rendering import render_answer
 from rag_agents.web.sse import format_sse, with_heartbeat
@@ -39,6 +40,7 @@ async def post_message(
     question = question.strip()
     if not _MIN_QUESTION <= len(question) <= _MAX_QUESTION:
         raise HTTPException(422, "Вопрос должен быть от 2 до 2000 символов")
+    await c.rate_limiter.check(Rule("questions", c.settings.rl_questions_per_min, 60), str(owner))
     try:
         chat_id = None if chat_ref == "new" else UUID(chat_ref)
         pair = await c.query.ask(owner, agent_id, chat_id, question)
