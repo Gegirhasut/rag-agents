@@ -1,6 +1,5 @@
 # RAG-агенты
 
-[![CI](https://github.com/Gegirhasut/rag-agents/actions/workflows/ci.yml/badge.svg)](https://github.com/Gegirhasut/rag-agents/actions/workflows/ci.yml)
 
 Пользователь создаёт «агента» (например, «Внутренний мир Льва Толстого»), загружает в него книги и получает ответы **только по этим материалам** — со ссылками на источники и стримингом.
 
@@ -8,7 +7,7 @@
 
 Документы: [SPEC](docs/SPEC.md) · [ARCHITECTURE](docs/ARCHITECTURE.md) · [PLAN](docs/PLAN.md) · [CLAUDE.md](CLAUDE.md) (правила разработки).
 
-**Статус:** итерация 2 — вход по паролю, JSON API с ключами, живые статусы, rate limit, CI. Итерация 1 — сквозной скелет (txt → очередь → Qdrant → вопрос → стрим DeepSeek).
+**Статус:** итерация 2 — вход по паролю, JSON API с ключами, живые статусы, rate limit. Итерация 1 — сквозной скелет (txt → очередь → Qdrant → вопрос → стрим DeepSeek).
 
 Обзор проекта со схемами (стек, workflow индексации и ответа, метрики): откройте [docs/interview/index.html](docs/interview/index.html) в браузере.
 
@@ -80,8 +79,7 @@ make langfuse-trace id=<trace>   # дерево span-ов, токены, cost и
 4. **Живые статусы.** Загрузить 3 файла → строки сами проходят `queued` → `processing` (этап, прогресс) → `done`. DevTools → Network: запросы `/documents/status` раз в 2 с, последний — `286`, дальше тишина. У `failed` есть кнопка ↻ (повтор), у завершённых — ✕ (удаление из PG, Qdrant и диска).
 5. **Rate limit.** 6 неверных паролей подряд → «Слишком много запросов. Повторите через N с.».
 6. **Логи с request_id.** `make logs s=web` — JSON-строки `http.request` с `request_id`, `user_id`, `status`, `duration_ms`; заголовок `X-Request-ID` в ответе.
-7. **CI.** Бейдж вверху README: GitHub Actions гоняет ruff, mypy, import-linter, unit и integration (PG, Redis, Qdrant — service-контейнеры).
-8. **Автопроверка:** `make lint test smoke` — smoke теперь логинится, а в конце задаёт тот же вопрос через JSON API по ключу.
+7. **Автопроверка:** `make lint test smoke` — smoke теперь логинится, а в конце задаёт тот же вопрос через JSON API по ключу.
 
 ## Как проверить итерацию 1 руками
 

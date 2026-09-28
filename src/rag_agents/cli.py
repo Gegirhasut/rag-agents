@@ -35,7 +35,7 @@ PasswordOpt = Annotated[
         confirmation_prompt=True,
         hide_input=True,
         envvar="RAG_USER_PASSWORD",
-        help="Пароль (≥ 8 символов). Без опции спрашивается интерактивно.",
+        help="Пароль. Без опции спрашивается интерактивно.",
     ),
 ]
 

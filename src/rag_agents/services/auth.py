@@ -22,7 +22,8 @@ from rag_agents.services.sessions import SessionStore
 
 log = structlog.get_logger()
 
-MIN_PASSWORD_LEN = 8
+# Локальный pet-проект: требований к сложности пароля нет, только непустой
+MIN_PASSWORD_LEN = 1
 # last_used_at пишем не чаще раза в минуту: иначе каждый запрос API — UPDATE в PG
 _TOUCH_EVERY = timedelta(minutes=1)
 
@@ -157,4 +158,4 @@ class AuthService:
 
 def _check_password(password: str) -> None:
     if len(password) < MIN_PASSWORD_LEN:
-        raise ValidationError(f"Пароль короче {MIN_PASSWORD_LEN} символов")
+        raise ValidationError("Пароль не может быть пустым")

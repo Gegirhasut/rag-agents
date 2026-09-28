@@ -57,7 +57,7 @@ migrations/  templates/  static/  tests/
 
 ## Итерация 2 — Фундамент: auth, API, статусы, CI (3 дня) — сделано 2026-09-28
 
-> Отклонения от плана: удаление документа в API синхронное (асинхронное через `deleting` — задача 9 итерации 3), удаление агента — мягкое без очистки Qdrant (там же). `/api/v1/agents/{id}/reindex` и `/chats` API — в итерациях 3 и 8. Проброс `request_id` в Celery — итерация 3.
+> CI (задача 8) по решению автора не делаем: проект локальный, проверки — `make lint test smoke`. Отклонения от плана: удаление документа в API синхронное (асинхронное через `deleting` — задача 9 итерации 3), удаление агента — мягкое без очистки Qdrant (там же). `/api/v1/agents/{id}/reindex` и `/chats` API — в итерациях 3 и 8. Проброс `request_id` в Celery — итерация 3.
 
 **Цель.** Проект выглядит как продукт: вход по паролю, JSON API с ключами, живые статусы, CI.
 
@@ -69,13 +69,13 @@ migrations/  templates/  static/  tests/
 5. Проверка владельца во всех сервисах + `tests/integration/test_isolation.py` (параметризованный обход эндпоинтов).
 6. Rate limit (Redis, sliding window) на вопросы и логин.
 7. structlog с `request_id`, `/healthz`, `/readyz`.
-8. GitHub Actions: ruff, mypy, pytest (сервисы PG, Redis, Qdrant в services-контейнерах), `import-linter`.
+8. ~~GitHub Actions~~ — не делаем (локальный проект).
 
 **Критерии готовности / демо**
 - Логин и логаут; чужой агент по прямой ссылке → 404.
 - `curl -N -H "Authorization: Bearer rag_…" .../api/v1/agents/{id}/query -d '{"question":"…","stream":true}'` стримит JSON-события.
 - Загружаю 3 файла → строки сами меняют статусы, polling останавливается, когда всё `done` (видно в DevTools).
-- Бейдж CI в README зелёный.
+- `make lint test` зелёные.
 
 ---
 
