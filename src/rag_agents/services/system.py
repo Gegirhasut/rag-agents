@@ -255,6 +255,23 @@ class SystemService:
         version = (await self._probe_http.get(f"{self.settings.qdrant_url}/")).json().get("version")
         return QdrantStats(version=version, collections=out)
 
+    async def queue_depths(self) -> dict[str, int]:
+        """Сообщений в очередях приложения (ready + unacked) для celery_queue_depth.
+
+        Недоступный RabbitMQ — пустой словарь и warning: /metrics не должен отвечать 500.
+        """
+        try:
+            resp = await self.rabbit_http.get("/api/queues")
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            log.warning("metrics.queue_depth_failed", error=type(e).__name__)
+            return {}
+        return {
+            q["name"]: q.get("messages_ready", 0) + q.get("messages_unacknowledged", 0)
+            for q in resp.json()
+            if not q["name"].startswith(("celery", "celeryev")) and ".pidbox" not in q["name"]
+        }
+
     async def _celery(self) -> CeleryStats:
         queues_resp, overview_resp, workers = await asyncio.gather(
             self.rabbit_http.get("/api/queues"),

@@ -143,3 +143,10 @@ class AgentRepository:
     async def list_indexes(self, agent_id: UUID) -> list[AgentIndexOut]:
         rows = await self.s.scalars(select(AgentIndex).where(AgentIndex.agent_id == agent_id))
         return [AgentIndexOut.model_validate(i) for i in rows]
+
+    async def find_by_slug(self, slug: str) -> list[AgentOut]:
+        """Админские инструменты (eval CLI): агенты с таким slug у всех владельцев."""
+        rows = await self.s.scalars(
+            select(Agent).where(Agent.slug == slug, Agent.deleted_at.is_(None))
+        )
+        return [_agent_out(a) for a in rows]

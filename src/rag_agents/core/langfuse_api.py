@@ -7,12 +7,16 @@ Metrics API сознательно не используем: на Hobby он о
 сводку считаем по своей БД (ARCHITECTURE §14.5).
 """
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+import structlog
 
 from rag_agents.core.config import Settings
+
+log = structlog.get_logger()
 
 
 class LangfuseApiError(Exception):
@@ -80,3 +84,67 @@ class LangfuseReader:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+class LangfuseDatasets(LangfuseReader):
+    """Запись eval в Langfuse Datasets (дублирует PG): сравнение прогонов в UI Langfuse.
+
+    Элементы датасета upsert-ятся по нашему id вопроса, прогон создаётся первым run-item.
+    """
+
+    # Выгрузка прогона — ~120 POST подряд, и Langfuse отвечает 429 с retry-after ~1 мин
+    # (поминутный лимит). Его пережидаем; длинный (суточный) — ошибка, а не зависание
+    MAX_WAIT_S = 120
+    MAX_WAITS = 3
+
+    async def _post(self, path: str, body: dict[str, Any]) -> Any:
+        for waits in range(self.MAX_WAITS + 1):
+            try:
+                r = await self._client.post(path, json=body)
+            except httpx.HTTPError as e:
+                raise LangfuseApiError(f"{path}: {e!r}") from e
+            if r.status_code != httpx.codes.TOO_MANY_REQUESTS:
+                break
+            retry_after = int(r.headers.get("retry-after") or 60)
+            if retry_after > self.MAX_WAIT_S or waits == self.MAX_WAITS:
+                raise LangfuseRateLimitedError(path, retry_after)
+            log.info("langfuse.rate_limited_wait", path=path, retry_after_s=retry_after)
+            await asyncio.sleep(retry_after)
+        if r.is_error:
+            raise LangfuseApiError(f"{path}: HTTP {r.status_code} {r.text[:200]}")
+        return r.json()
+
+    async def upsert_dataset(self, name: str, description: str) -> None:
+        await self._post("/v2/datasets", {"name": name, "description": description})
+
+    async def upsert_item(
+        self,
+        dataset: str,
+        item_id: str,
+        input_: dict[str, Any],
+        expected: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> None:
+        await self._post(
+            "/dataset-items",
+            {
+                "datasetName": dataset,
+                "id": item_id,
+                "input": input_,
+                "expectedOutput": expected,
+                "metadata": metadata,
+            },
+        )
+
+    async def link_run_item(
+        self, run_name: str, item_id: str, trace_id: str, metadata: dict[str, Any]
+    ) -> None:
+        await self._post(
+            "/dataset-run-items",
+            {
+                "runName": run_name,
+                "datasetItemId": item_id,
+                "traceId": trace_id,
+                "metadata": metadata,
+            },
+        )

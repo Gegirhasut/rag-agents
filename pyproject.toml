@@ -35,6 +35,7 @@ dependencies = [
     "razdel>=0.5",
     "pymupdf>=1.24",
     "python-docx>=1.1",
+    "prometheus-client>=0.21",
 ]
 
 [dependency-groups]
@@ -128,3 +129,10 @@ type = "forbidden"
 allow_indirect_imports = true
 source_modules = ["rag_agents.workers"]
 forbidden_modules = ["rag_agents.web", "rag_agents.repositories", "rag_agents.rag"]
+
+[[tool.importlinter.contracts]]
+name = "Eval goes through services like any client"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = ["rag_agents.eval"]
+forbidden_modules = ["rag_agents.web", "rag_agents.api", "rag_agents.workers", "rag_agents.repositories", "rag_agents.models"]

@@ -1,0 +1,8 @@
+# Baseline своего ядра (итерация 4): dense-поиск bge-m3, top_k из настроек агента (6),
+# без rerank и гибрида. Для метрик достаём 20 кандидатов (hit@20), в промпт идут top_k.
+name: dense
+description: "Dense (bge-m3, cosine) → top_k=6 → DeepSeek, промпт answer_v1"
+search_k: 20
+judge: true
+concurrency: 2
+langfuse: true

@@ -16,6 +16,7 @@ import anyio
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from rag_agents.core import metrics
 from rag_agents.core.config import Settings
 from rag_agents.core.db import Database
 from rag_agents.core.errors import PermanentError, TransientError
@@ -376,6 +377,7 @@ class IngestService:
             with root.child("embed", as_type="embedding", model=self.settings.embedding_model):
                 vectors = await self.embedder.embed([c.embed_text for c in chunks])
             embed_ms = _ms(t)
+            metrics.EMBED_BATCH_SECONDS.observe(embed_ms / 1000)
             points = [
                 (
                     c.id,
@@ -454,6 +456,7 @@ class IngestService:
                 agent_id=agent.id,
             )
             log.info("ingest.done")
+            await self._observe_finished(task.document_id)
         elif progress is not None:
             await self.progress.set(
                 task.document_id, IngestStage.EMBEDDING, progress[0] / max(progress[1], 1)
@@ -471,6 +474,20 @@ class IngestService:
             await JobRepository(uow.session).finish(job_id, JobStatus.FAILED, code)
             await uow.commit()
         await self.trace.emit("ingest.failed", "worker", "postgres", f"failed: {code}")
+        await self._observe_finished(doc_id)
+
+    async def _observe_finished(self, doc_id: UUID) -> None:
+        """Prometheus: документ дошёл до done/failed (формат и длительность — из PG)."""
+        async with self.db.session() as s:
+            doc = await DocumentRepository(s).get_for_worker(doc_id)
+        if doc is None:
+            return
+        fmt = doc.format.value
+        metrics.INGEST_DOCUMENTS.labels(doc.status.value, fmt).inc()
+        if doc.status == DocumentStatus.DONE:
+            metrics.INGEST_CHUNKS.inc(doc.chunks_total or 0)
+            if doc.duration_s is not None:
+                metrics.INGEST_SECONDS.labels(fmt).observe(doc.duration_s)
 
     # ------------------------------------------------------------------ maintenance
 

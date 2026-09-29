@@ -25,6 +25,7 @@ from rag_agents.rag.index.qdrant import QdrantChunkIndex
 from rag_agents.services.agents import AgentService
 from rag_agents.services.auth import AuthService
 from rag_agents.services.documents import DocumentService
+from rag_agents.services.eval import EvalService
 from rag_agents.services.ingest import IngestService
 from rag_agents.services.insights import InsightsService
 from rag_agents.services.progress import ProgressStore
@@ -55,6 +56,7 @@ class Container:
     insights: InsightsService
     auth: AuthService
     rate_limiter: RateLimiter
+    evals: EvalService
     _ingest: IngestService | None = field(default=None)
 
     @property
@@ -156,5 +158,6 @@ def build_container(
         insights=InsightsService(LangfuseReader(settings), redis, db, prices),
         auth=AuthService(db, SessionStore(redis, settings.session_ttl_s)),
         rate_limiter=RateLimiter(redis, enabled=settings.rate_limit_enabled),
+        evals=EvalService(db),
         _ingest=ingest,
     )

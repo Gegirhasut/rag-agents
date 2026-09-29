@@ -284,6 +284,25 @@ sequenceDiagram
 
 **Альтернативы.** `@observe` и `start_as_current_observation` — меньше кода, но контекст теряется в стриме (см. выше). OpenLLMetry или OTel-инструментация httpx — нет контроля над тем, что уходит (тексты документов в ingest-трейс писать нельзя).
 
+### ADR-10. Eval-судья — своя реализация метрик в духе RAGAS, без библиотеки RAGAS
+**Решение** (итерация 4, 2026-09-29). `eval/judge.py::LLMJudge`, версия `judge_v1`, промпты в `eval/prompts/judge_v1_*.txt`. Три вызова LLM на вопрос, каждый возвращает один JSON-объект (`response_format=json_object`, `LLMRequest.json_mode`):
+1. `faithfulness`: ответ раскладывается на утверждения (≤ `max_claims`), каждое сверяется с источниками. Заодно проверяется, подтверждает ли процитированный `[n]` своё утверждение (**citation support**).
+2. `context`: какие источники полезны для эталонного ответа (**context precision** как average precision по рангу) и какие `key_facts` в них есть (**context recall**).
+3. `answer`: **answer relevancy** (0 / 0.5 / 1) и покрытие `key_facts`.
+
+Сбой судьи (сеть, невалидный JSON, неверная форма) не валит прогон: метрика вопроса = `None` (не входит в среднее, `n` в отчёте меньше), причина лежит в `eval_items.judge`.
+
+**Reasoning-модель в роли судьи.** У `deepseek-flash` нет режима без рассуждений (§12.3), `effort=low` — минимум. Замеры 2026-09-29:
+- шаги `context` и `answer` — 150–3 300 токенов reasoning; `faithfulness` короткого ответа — 300–3 000, длинного (1–2 тыс. символов, обычно `interpretive` и `multi_hop`) — **5 500–14 300**;
+- с лимитом 2 000 шаги `context` и `faithfulness` возвращали пустой content (`finish_reason=length`) почти у всех вопросов; с лимитом 8 000 faithfulness терялась у 6 из 38 ответов baseline-прогона, и все 6 — длинные ответы. С лимитом 16 000 те же 6 шагов прошли за 26–53 с;
+- длина рассуждений на одном шаге гуляет между попытками (на одном вопросе: ~3 000, ~3 000 и весь лимит).
+
+Поэтому `max_tokens` судьи — **24 000** (оплачиваются фактически потраченные токены: судья стоит ~$0.5 на прогон из 59 вопросов), а при `finish_reason=length` — одна повторная попытка. Если и она обрезана, в `judge` пишется `{"error": "truncated", "reasoning_tokens": N}`, а не безликий «invalid json».
+
+**Почему не RAGAS.** RAGAS тянет LangChain (в проекте запрещён, см. CLAUDE.md) и десятки транзитивных зависимостей в образ, промпты у него англоязычные и меняются между версиями (метрика «плывёт» при обновлении пакета), а JSON-режим и reasoning-модели DeepSeek он поддерживает через обёртки. Свой судья — ~200 строк: промпты на русском под наш корпус, версия судьи фиксируется в снимке прогона, unit-тесты на записанных ответах.
+
+**Цена.** Метрики не сопоставимы 1:1 с опубликованными цифрами RAGAS. Смещение судьи (self-preference: `deepseek-flash` оценивает ответы `deepseek-flash`) не измерено — сверка 10 % вопросов другим судьёй (Claude) остаётся задачей итерации 5. Изменение промптов судьи = новая `JUDGE_VERSION` (пишется в снимок прогона); `eval-diff` для прогонов с разными судьями выводит предупреждение: сопоставимы только retrieval-метрики.
+
 ---
 
 ## 4. Слои и структура кода
@@ -1018,7 +1037,11 @@ CREATE TABLE eval_runs (
 CREATE TABLE eval_items (
   run_id uuid NOT NULL REFERENCES eval_runs ON DELETE CASCADE, item_id text NOT NULL,
   question text NOT NULL, category text NOT NULL,
-  retrieved jsonb, answer text, scores jsonb, latency_ms int, cost_usd numeric(10,6),
+  retrieved jsonb,                 -- найденные кандидаты (search_k): документ, раздел, score
+  answer text, error text, refused boolean,
+  scores jsonb,                    -- метрики вопроса: hit@k, recall@k, faithfulness, …
+  judge jsonb,                     -- сырые ответы судьи по шагам (или {"error": …})
+  trace_id text, latency_ms int, ttft_ms int, cost_usd numeric(10,6),
   PRIMARY KEY (run_id, item_id)
 );
 ```
@@ -1356,7 +1379,10 @@ Healthchecks у всех хранилищ. `depends_on: condition: service_healt
 - `llm_tokens_total{provider,model,kind=input|cached|output}`, `llm_cost_usd_total`, `llm_errors_total{provider,code}`, `llm_breaker_state{provider}`.
 - `ingest_documents_total{status,format}`, `ingest_duration_seconds{format}`, `ingest_chunks_total`, `embed_batch_seconds`.
 - `celery_queue_depth{queue}` (снимает beat через management API RabbitMQ).
-- Воркеры отдают метрики через `prometheus_client` multiprocess mode в общий каталог, а web агрегирует их на `/metrics`. Prometheus и Grafana в MVP не поднимаем (память). Проверяем через `curl`, в итерации 9 — опциональный профиль.
+- Воркеры отдают метрики через `prometheus_client` multiprocess mode в общий каталог, а web агрегирует их на `/metrics`. Prometheus и Grafana в MVP не поднимаем (память). Проверяем через `curl` (`make metrics`), в итерации 9 — опциональный профиль.
+- Каталог — volume `metrics` (`PROMETHEUS_MULTIPROC_DIR=/data/metrics`), общий для web, воркеров и beat. Файлы называются по `hostname-pid`, а не по PID (`core/metrics.py::process_id`): у каждого контейнера своё пространство PID, и по умолчанию все PID 1 писали бы в один `counter_1.db`. После пересоздания контейнера (новый hostname) старые файлы остаются и продолжают суммироваться: счётчики считаются «с момента создания volume», для MVP это приемлемо. Сброс — `docker volume rm rag-agents_metrics` при остановленном стенде.
+- `celery_queue_depth` снимается в момент scrape: web спрашивает management API RabbitMQ (тот же запрос, что у `/system`).
+- Одноразовый контейнер `eval` в общий каталог не пишет: `env -u PROMETHEUS_MULTIPROC_DIR` в entrypoint. Пустое значение не помогает, prometheus_client проверяет наличие переменной, а не значение.
 
 ---
 
@@ -1388,15 +1414,16 @@ Healthchecks у всех хранилищ. `depends_on: condition: service_healt
 | Уровень | Метрика | Как считаем |
 |---|---|---|
 | Retrieval | hit@k, recall@k (k=5, 8, 20), MRR@10 | совпадение `(document, chapter)` найденных чанков с `expected_sources`; chapter=null → совпадение по документу |
-| Retrieval | context precision / recall | RAGAS (`LLMContextPrecisionWithReference`, `LLMContextRecall`) |
-| Генерация | faithfulness | RAGAS: доля утверждений ответа, выводимых из контекста |
-| Генерация | answer relevancy / factual correctness | RAGAS; `key_facts` coverage — собственный LLM-judge |
+| Retrieval | context precision / recall | LLM-судья (ADR-10): AP полезных источников по рангу; доля `key_facts`, найденных в контексте |
+| Генерация | faithfulness | LLM-судья: доля утверждений ответа, выводимых из контекста |
+| Генерация | answer relevancy, `key_facts` coverage | LLM-судья: 0 / 0.5 / 1 и доля покрытых ключевых фактов |
 | Отказы | refusal precision / recall | по `category == out_of_corpus` vs `refused` |
+| Отказы | `empty_answer` (меньше — лучше) | ответ пуст, но это не отказ: reasoning-модель израсходовала `max_output_tokens` на рассуждения (§12.3). Для вопроса из корпуса считается провалом: relevancy и покрытие фактов = 0, а не пропуск |
 | Цитаты | citation validity, citation support | доля валидных `[n]`; LLM-judge: подтверждает ли источник [n] утверждение рядом |
 | Эксплуатация | TTFT, total latency p50/p95, токены, $ | из `usage` |
 
-- **Judge-LLM**: `deepseek-flash` (дёшево) и выборочная сверка 10 % через `claude-sonnet-5`, чтобы оценить смещение судьи (judge self-preference). RAGAS подключается через его OpenAI-совместимый LLM-wrapper с base_url DeepSeek. Эмбеддинги для RAGAS берутся из того же Ollama.
-- **Runner**: `python -m rag_agents.eval run --agent tolstoy --config configs/eval/hybrid_rerank.yaml` вызывает **тот же `QueryService`**, что и прод (без HTTP), с отключённым кэшем. Результат — `eval_runs`/`eval_items` + `reports/eval/<date>_<config>.md` со сводной таблицей и худшими 10 примерами.
+- **Judge-LLM**: `deepseek-flash`, своя реализация метрик в духе RAGAS (ADR-10, почему не библиотека RAGAS). Выборочная сверка 10 % другим судьёй (Claude), чтобы оценить смещение (judge self-preference), — итерация 5.
+- **Runner**: `make eval AGENT=tolstoi CONFIG=dense [LIMIT=5] [JUDGE=0]` → одноразовый контейнер `eval` (профиль `tools`) → `python -m rag_agents.eval run`. Вызывает **тот же `QueryService`**, что и прод (без HTTP; пакет `eval` ходит только в сервисы, проверяется import-linter). Для метрик достаёт `search_k` кандидатов (hit@20), в промпт идут `top_k` из настроек агента или конфига. Результат — `eval_runs`/`eval_items` + `reports/eval/<date>_<config>_<run>.md` (сводка, по категориям, 10 худших примеров со ссылкой на трейс) + прогон в Langfuse Datasets (поминутный 429 пережидается; если выгрузка всё же не удалась — `make eval-export RUN=…`). `make eval-list`, `make eval-diff A=… B=…`.
 - **Конфигурации своего ядра** (итерация 5): `dense` → `hybrid` (RRF) → `hybrid_rerank` → `+neighbors`; размеры чанка `c256` / `c400` / `c800` (каждый требует отдельного индекса); reranker `bge-v2-m3` vs `mmarco-mMiniLM`.
 - **Статистика.** При 50 вопросах разница в несколько пунктов может быть шумом. Для сравнения двух конфигураций используется парный bootstrap по вопросам (10 000 ресэмплов): 95 % CI разницы метрики. «Улучшение» — только если CI не пересекает 0.
 - **Регрессия в CI**: мини-датасет из 10 вопросов с замоканным LLM проверяет только retrieval-метрики на фикстурном корпусе (без сети). Полный eval — вручную или nightly.

@@ -164,3 +164,59 @@ class RecordingTracer:
 
     def roots(self) -> list[RecordedSpan]:
         return [s for s in self.spans if s.parent is None]
+
+
+class KeywordEmbedder:
+    """Детерминированный «эмбеддер» для мини-eval: вектор = частоты ключевых основ + смещение.
+
+    Retrieval становится осмысленным без Ollama: вопрос про дуб находит главу про дуб.
+    """
+
+    model = "keyword-embed"
+    STEMS = ("дуб", "неб", "бал", "вальс", "дракон", "мыш", "вер", "смерт")
+    dim = len(STEMS) + 1
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        out = []
+        for t in texts:
+            low = t.lower()
+            out.append([float(low.count(s)) for s in self.STEMS] + [0.1])
+        return out
+
+
+@dataclass
+class ScriptedLLM:
+    """LLM, отвечающий по правилам: первое правило, все подстроки которого есть в последнем
+    сообщении (одна строка или кортеж строк)."""
+
+    rules: list[tuple[str | tuple[str, ...], str]]
+    default: str = "Ответ [1]."
+    name: str = "deepseek"
+    model: str = "deepseek-flash"
+    reasoning_effort: str | None = "low"
+    requests: list[LLMRequest] = field(default_factory=list)
+    # Подстроки промпта, на которых reasoning-модель съедает весь max_tokens: content пуст,
+    # finish_reason=length (так ведёт себя deepseek-flash на длинных промптах судьи)
+    truncate_on: tuple[str, ...] = ()
+    truncate_times: int = 1_000_000  # сколько раз обрезать, дальше отвечать по правилам
+
+    async def stream(self, req: LLMRequest) -> AsyncIterator[LLMChunk]:
+        self.requests.append(req)
+        prompt = req.messages[-1].content or ""
+        if self.truncate_times > 0 and any(n in prompt for n in self.truncate_on):
+            self.truncate_times -= 1
+            usage = LLMUsage(
+                input_tokens=50, output_tokens=req.max_tokens, reasoning_tokens=req.max_tokens
+            )
+            yield LLMChunk(finish_reason="length", usage=usage)
+            return
+        text = next(
+            (
+                answer
+                for needles, answer in self.rules
+                if all(n in prompt for n in ((needles,) if isinstance(needles, str) else needles))
+            ),
+            self.default,
+        )
+        yield LLMChunk(delta=text)
+        yield LLMChunk(finish_reason="stop", usage=LLMUsage(input_tokens=50, output_tokens=10))

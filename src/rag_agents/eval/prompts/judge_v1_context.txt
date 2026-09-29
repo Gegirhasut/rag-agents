@@ -1,0 +1,14 @@
+Даны ВОПРОС, ЭТАЛОННЫЙ ОТВЕТ, КЛЮЧЕВЫЕ ФАКТЫ и пронумерованные ИСТОЧНИКИ.
+- "useful": номера источников, в которых есть информация, нужная для эталонного ответа;
+- "facts_in_sources": для каждого ключевого факта по порядку — true, если он содержится хотя бы в одном источнике.
+
+Формат: {{"useful": [1, 3], "facts_in_sources": [true, false]}}
+
+<question>{question}</question>
+<reference>{reference}</reference>
+<key_facts>
+{facts}
+</key_facts>
+<sources>
+{sources}
+</sources>

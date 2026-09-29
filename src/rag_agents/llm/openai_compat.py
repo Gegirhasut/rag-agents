@@ -65,6 +65,8 @@ class OpenAICompatProvider:
         }
         if self.reasoning_effort:
             payload["reasoning_effort"] = self.reasoning_effort
+        if req.json_mode:
+            payload["response_format"] = {"type": "json_object"}
         return payload
 
     async def stream(self, req: LLMRequest) -> AsyncIterator[LLMChunk]:

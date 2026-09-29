@@ -1,17 +1,19 @@
 import asyncio
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
 import structlog
 
+from rag_agents.core import metrics
 from rag_agents.core.config import Settings
 from rag_agents.core.db import Database
 from rag_agents.core.errors import PermanentError, TransientError
 from rag_agents.core.observability import ObservationFields, Span, Tracer
-from rag_agents.domain.agents import AgentOut
+from rag_agents.domain.agents import AgentOut, RetrievalSettings
 from rag_agents.domain.answers import (
     AnswerUsage,
     Citation,
@@ -25,6 +27,7 @@ from rag_agents.domain.answers import (
 )
 from rag_agents.domain.chats import MessageOut, MessagePair
 from rag_agents.domain.enums import MessageRole, MessageStatus
+from rag_agents.domain.eval import EvalAnswer
 from rag_agents.llm.base import LLMError, LLMProvider, LLMRequest, LLMUsage
 from rag_agents.llm.prices import CostBreakdown, PriceTable
 from rag_agents.rag.cleaning.orthography import norm_text
@@ -37,6 +40,7 @@ from rag_agents.rag.prompting.builder import (
     build_citations,
     build_messages,
 )
+from rag_agents.rag.prompting.citations import is_grounded
 from rag_agents.repositories.agents import AgentRepository
 from rag_agents.repositories.chats import ChatRepository
 from rag_agents.services.errors import NotFoundError
@@ -54,6 +58,23 @@ class AnswerFailedError(Exception):
 
 def _ms(since: float) -> int:
     return int((time.monotonic() - since) * 1000)
+
+
+@dataclass
+class _AnswerRun:
+    """Один прогон конвейера: куда пишется ответ и как называется трейс.
+
+    Прод — сообщение чата (message_id), eval — никуда (message_id=None): ответ не попадает
+    в историю чатов и в /insights, а найденные кандидаты собираются в retrieved для метрик.
+    """
+
+    trace_seed: str
+    session_id: str
+    tags: list[str]
+    metadata: dict[str, str]
+    message_id: UUID | None = None
+    search_k: int = 0  # eval: сколько кандидатов достать для hit@k/recall@k (≥ top_k)
+    retrieved: list[RetrievedChunk] = field(default_factory=list)
 
 
 class QueryService:
@@ -160,7 +181,58 @@ class QueryService:
             await uow.commit()
         if not claimed:
             return self._replay(msg)
-        return self._generate(agent, owner_id, msg.chat_id, message_id, question or "")
+        run = _AnswerRun(
+            trace_seed=f"query:{message_id}",
+            session_id=str(msg.chat_id),
+            tags=[agent.name],
+            metadata={"message_id": str(message_id)},
+            message_id=message_id,
+        )
+        return self._generate(agent, owner_id, run, question or "")
+
+    async def evaluate(
+        self,
+        owner_id: UUID,
+        agent_id: UUID,
+        question: str,
+        *,
+        run_id: UUID,
+        item_id: str,
+        retrieval: RetrievalSettings | None = None,
+        search_k: int = 20,
+    ) -> EvalAnswer:
+        """Тот же конвейер, что у пользователя, но без чата: для eval (ARCHITECTURE §15.2).
+
+        retrieval перекрывает настройки агента (эксперимент конфигурации), search_k — сколько
+        кандидатов вернуть для retrieval-метрик; в промпт по-прежнему идут top_k.
+        Трейс — сессия `eval-{run_id}`: прогон целиком виден в Langfuse рядом.
+        """
+        agent = await self._agent(owner_id, agent_id)
+        if retrieval is not None:
+            settings = agent.settings.model_copy(update={"retrieval": retrieval})
+            agent = agent.model_copy(update={"settings": settings})
+        run = _AnswerRun(
+            trace_seed=f"eval:{run_id}:{item_id}",
+            session_id=f"eval-{run_id}",
+            tags=[agent.name, "eval"],
+            metadata={"eval_run_id": str(run_id), "eval_item_id": item_id},
+            search_k=search_k,
+        )
+        result: QueryResult | None = None
+        error: str | None = None
+        async for ev in self._generate(agent, owner_id, run, question):
+            match ev:
+                case DoneEvent():
+                    result = ev.result
+                case ErrorEvent():
+                    error = ev.code
+        return EvalAnswer(
+            result=result,
+            error=error,
+            retrieved=run.retrieved,
+            context_k=agent.settings.retrieval.top_k,
+            trace_id=self.tracer.trace_id_for(run.trace_seed) if self.tracer.enabled else None,
+        )
 
     async def answer(self, owner_id: UUID, agent_id: UUID, message_id: UUID) -> QueryResult:
         """Ответ без стрима (JSON API): тот же конвейер, события собираются до done."""
@@ -221,13 +293,14 @@ class QueryService:
         return msg
 
     async def _generate(
-        self, agent: AgentOut, owner_id: UUID, chat_id: UUID, message_id: UUID, question: str
+        self, agent: AgentOut, owner_id: UUID, run: _AnswerRun, question: str
     ) -> AsyncIterator[StreamEvent]:
         t0 = time.monotonic()
         parts: list[str] = []
         citations: list[Citation] = []
-        log.info("query.start", agent_id=str(agent.id), message_id=str(message_id))
-        root = self._start_trace(agent, owner_id, chat_id, message_id, question)
+        message_id = run.message_id
+        log.info("query.start", agent_id=str(agent.id), **run.metadata)
+        root = self._start_trace(agent, owner_id, run, question)
         generation: Span | None = None
         try:
             await self.trace.emit(
@@ -237,8 +310,7 @@ class QueryService:
                 "EventSource: SSE-стрим ответа открыт",
                 agent_id=agent.id,
             )
-            chunks, t_embed, t_search = await self._retrieve(agent, question, root)
-            t_retrieval = _ms(t0)
+            chunks, t_embed, t_search = await self._retrieve(agent, question, root, run)
 
             if not chunks:
                 yield DoneEvent(
@@ -246,16 +318,9 @@ class QueryService:
                 )
                 return
 
-            citations = build_citations(chunks)
+            citations, request = self._build_context(agent, question, chunks, root)
+            t_retrieval = _ms(t0)
             yield SourcesEvent(citations=citations)
-
-            persona = AgentPersona(agent.name, agent.description, agent.persona_prompt)
-            gen = agent.settings.generation
-            request = LLMRequest(
-                messages=build_messages(persona, question, chunks),
-                temperature=gen.temperature,
-                max_tokens=gen.max_output_tokens,
-            )
             await self._trace_llm_call(agent.id, len(chunks))
             generation = self._start_generation(root, request)
             llm_usage = LLMUsage()
@@ -264,6 +329,7 @@ class QueryService:
                 if chunk.delta:
                     if t_first is None:
                         t_first = _ms(t0)
+                        metrics.RAG_STAGE_SECONDS.labels("ttft").observe(t_first / 1000)
                         # Langfuse считает TTFT от старта generation до completion_start_time
                         generation.update(completion_start_time=datetime.now(UTC))
                         await self._trace_first_token(agent.id, t_first)
@@ -286,6 +352,7 @@ class QueryService:
             )
             await self._save(message_id, MessageStatus.DONE, result, root.trace_id)
             self._end_generation(generation, root, result, llm_usage, t_first, cost)
+            self._observe_answer(result, llm_usage, cost, n_sources=len(citations))
             await self._trace_done(agent.id, message_id, usage)
             yield DoneEvent(result=result)
         except (LLMError, TransientError, PermanentError) as e:
@@ -305,17 +372,44 @@ class QueryService:
                 generation.end()
             root.end()
 
+    def _observe_answer(
+        self,
+        result: QueryResult,
+        llm_usage: LLMUsage,
+        cost: CostBreakdown | None,
+        *,
+        n_sources: int,
+    ) -> None:
+        provider, model = self.llm.name, self.llm.model
+        grounded = is_grounded(result.answer_md, result.refused, n_sources)
+        metrics.RAG_ANSWERS.labels(
+            str(result.refused).lower(), str(grounded).lower(), "false", provider, "false"
+        ).inc()
+        if result.usage is not None:
+            metrics.RAG_STAGE_SECONDS.labels("total").observe(result.usage.t_total_ms / 1000)
+        tokens = metrics.LLM_TOKENS
+        tokens.labels(provider, model, "input").inc(
+            llm_usage.input_tokens - llm_usage.cached_input_tokens
+        )
+        tokens.labels(provider, model, "cached").inc(llm_usage.cached_input_tokens)
+        tokens.labels(provider, model, "output").inc(llm_usage.output_tokens)
+        if cost is not None:
+            metrics.LLM_COST.labels(provider, model).inc(cost.total)
+
     async def _fail(
         self,
         e: LLMError | TransientError | PermanentError,
         agent_id: UUID,
-        message_id: UUID,
+        message_id: UUID | None,
         parts: list[str],
         citations: list[Citation],
         root: Span,
         generation: Span | None,
     ) -> ErrorEvent:
         log.warning("query.failed", message_id=str(message_id), error=str(e))
+        if isinstance(e, LLMError):
+            code = str(e.status) if e.status else "timeout_or_transport"
+            metrics.LLM_ERRORS.labels(self.llm.name, code).inc()
         await self.trace.emit(
             "query.failed", "web", "browser", f"Ошибка: {type(e).__name__}", agent_id=agent_id
         )
@@ -332,30 +426,55 @@ class QueryService:
 
     @staticmethod
     def _end_cancelled(
-        message_id: UUID, parts: list[str], root: Span, generation: Span | None
+        message_id: UUID | None, parts: list[str], root: Span, generation: Span | None
     ) -> None:
         if generation is not None:
             generation.end(output="".join(parts), level="WARNING", status_message="cancelled")
         root.end(level="WARNING", status_message="client_cancelled")
         log.info("query.cancelled", message_id=str(message_id))
 
-    def _start_trace(
-        self, agent: AgentOut, owner_id: UUID, chat_id: UUID, message_id: UUID, question: str
-    ) -> Span:
-        """Трейс на вопрос: session = чат, user = владелец, tags = имя агента (§14.2)."""
+    def _start_trace(self, agent: AgentOut, owner_id: UUID, run: _AnswerRun, question: str) -> Span:
+        """Трейс на вопрос: session = чат (или eval-прогон), user = владелец, tags (§14.2)."""
         return self.tracer.start_trace(
             "query",
-            trace_id=self.tracer.trace_id_for(f"query:{message_id}"),
+            trace_id=self.tracer.trace_id_for(run.trace_seed),
             user_id=str(owner_id),
-            session_id=str(chat_id),
-            tags=[agent.name],
+            session_id=run.session_id,
+            tags=run.tags,
             input=question,
             metadata={
                 "agent_id": str(agent.id),
-                "message_id": str(message_id),
                 "prompt_version": PROMPT_VERSION,
+                "top_k": str(agent.settings.retrieval.top_k),
+                **run.metadata,
             },
         )
+
+    def _build_context(
+        self, agent: AgentOut, question: str, chunks: list[RetrievedChunk], root: Span
+    ) -> tuple[list[Citation], LLMRequest]:
+        """Найденные чанки → карточки цитат и промпт. Отдельный span: в итерации 5 здесь
+        появятся соседние чанки и бюджет контекста."""
+        t = time.monotonic()
+        with root.child(
+            "build_context", input={"chunks": len(chunks), "prompt_version": PROMPT_VERSION}
+        ) as span:
+            citations = build_citations(chunks)
+            persona = AgentPersona(agent.name, agent.description, agent.persona_prompt)
+            gen = agent.settings.generation
+            request = LLMRequest(
+                messages=build_messages(persona, question, chunks),
+                temperature=gen.temperature,
+                max_tokens=gen.max_output_tokens,
+            )
+            span.update(
+                output={
+                    "sources": len(citations),
+                    "context_chars": sum(len(c.payload.text) for c in chunks),
+                }
+            )
+        metrics.RAG_STAGE_SECONDS.labels("context").observe(time.monotonic() - t)
+        return citations, request
 
     def _start_generation(self, root: Span, request: LLMRequest) -> Span:
         return root.child(
@@ -431,7 +550,7 @@ class QueryService:
     async def _refuse(
         self,
         agent: AgentOut,
-        message_id: UUID,
+        message_id: UUID | None,
         root: Span,
         t0: float,
         t_embed: int,
@@ -458,6 +577,8 @@ class QueryService:
         )
         await self._save(message_id, MessageStatus.DONE, result, root.trace_id)
         root.end(output=REFUSAL_TEXT, metadata={"refused": True, "reason": "no_chunks"})
+        metrics.RAG_ANSWERS.labels("true", "true", "false", "none", "false").inc()
+        metrics.RAG_STAGE_SECONDS.labels("total").observe(t_total / 1000)
         await self.trace.emit(
             "query.refused", "web", "browser", "Ничего не найдено → отказ", agent_id=agent.id
         )
@@ -496,7 +617,9 @@ class QueryService:
             agent_id=agent_id,
         )
 
-    async def _trace_done(self, agent_id: UUID, message_id: UUID, usage: AnswerUsage) -> None:
+    async def _trace_done(
+        self, agent_id: UUID, message_id: UUID | None, usage: AnswerUsage
+    ) -> None:
         log.info(
             "query.done",
             message_id=str(message_id),
@@ -525,9 +648,13 @@ class QueryService:
         )
 
     async def _retrieve(
-        self, agent: AgentOut, question: str, root: Span
+        self, agent: AgentOut, question: str, root: Span, run: _AnswerRun
     ) -> tuple[list[RetrievedChunk], int, int]:
-        """Вопрос → вектор (Ollama) → top-k чанков агента (Qdrant). Каждый шаг — span трейса."""
+        """Вопрос → вектор (Ollama) → top-k чанков агента (Qdrant). Каждый шаг — span трейса.
+
+        Для eval достаётся больше кандидатов (run.search_k): они нужны метрикам hit@20,
+        в промпт по-прежнему идут первые top_k — ответ тот же, что у пользователя.
+        """
         emit = self.trace.emit
         collection = await self._collection(agent)
         await emit(
@@ -547,6 +674,7 @@ class QueryService:
             [vector] = await self.embedder.embed([norm_text(question)])
             span.update(output={"dim": len(vector)})
         t_embed = _ms(t)
+        metrics.RAG_STAGE_SECONDS.labels("embed_query").observe(t_embed / 1000)
         await emit(
             "query.embedded",
             "ollama",
@@ -556,6 +684,7 @@ class QueryService:
             vector=[round(v, 4) for v in vector],
         )
         top_k = agent.settings.retrieval.top_k
+        search_k = max(top_k, run.search_k)
         await emit(
             "query.search",
             "web",
@@ -571,10 +700,12 @@ class QueryService:
                 "agent_id": str(agent.id),
                 "collection": collection,
                 "top_k": top_k,
+                "search_k": search_k,
                 "mode": "dense",
             },
         ) as span:
-            chunks = await self.index.search_dense(collection, agent.id, vector, top_k)
+            run.retrieved = await self.index.search_dense(collection, agent.id, vector, search_k)
+            chunks = run.retrieved[:top_k]
             span.update(
                 output=[
                     {
@@ -593,6 +724,7 @@ class QueryService:
                 },
             )
         t_search = _ms(t)
+        metrics.RAG_STAGE_SECONDS.labels("search").observe(t_search / 1000)
         await emit(
             "query.found",
             "qdrant",
@@ -623,8 +755,10 @@ class QueryService:
         return index.collection
 
     async def _save(
-        self, message_id: UUID, status: MessageStatus, result: QueryResult, trace_id: str
+        self, message_id: UUID | None, status: MessageStatus, result: QueryResult, trace_id: str
     ) -> None:
+        if message_id is None:
+            return  # eval: ответ не сохраняется в чаты
         async with self.db.uow() as uow:
             await ChatRepository(uow.session).finish_message(
                 message_id,
@@ -640,12 +774,14 @@ class QueryService:
 
     async def _save_partial(
         self,
-        message_id: UUID,
+        message_id: UUID | None,
         status: MessageStatus,
         parts: list[str],
         citations: list[Citation],
         trace_id: str,
     ) -> None:
+        if message_id is None:
+            return
         async with self.db.uow() as uow:
             await ChatRepository(uow.session).finish_message(
                 message_id,

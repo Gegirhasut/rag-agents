@@ -109,14 +109,21 @@ async def test_question_produces_trace_with_retrieval_and_generation(
     }
     assert root.fields["output"] == "Смысл жизни [1]."
     assert root.ended == 1
-    assert [c.name for c in root.children] == ["embed_query", "qdrant_search", "llm_generate"]
+    assert [c.name for c in root.children] == [
+        "embed_query",
+        "qdrant_search",
+        "build_context",
+        "llm_generate",
+    ]
 
-    embed, search, gen = root.children
+    embed, search, context, gen = root.children
     assert embed.as_type == "embedding"
     assert search.as_type == "retriever"
     assert search.fields["input"]["agent_id"] == str(agent.id)
     [hit] = search.fields["output"]
     assert set(hit) >= {"chunk_id", "document_id", "score"}
+    assert context.fields["output"]["sources"] == 1
+    assert context.fields["output"]["context_chars"] > 0
 
     assert gen.as_type == "generation"
     assert gen.fields["model"] == "deepseek-flash"

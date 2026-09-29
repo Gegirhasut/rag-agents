@@ -5,7 +5,7 @@ TEST_COMPOSE := docker compose -f compose.test.yaml
 TEST_ENV := DATABASE_URL=postgresql+asyncpg://rag_test:rag_test@127.0.0.1:15432/rag_test \
             QDRANT_URL=http://127.0.0.1:16333 REDIS_URL=redis://127.0.0.1:16379/0 APP_ENV=test
 
-.PHONY: dlq-replay chaos-embed help up up-debug down build logs ps migrate seed sh lint fmt test test-unit test-integration test-up test-down smoke demo-traffic langfuse-check langfuse-model langfuse-trace
+.PHONY: eval eval-diff eval-list eval-export metrics dlq-replay chaos-embed help up up-debug down build logs ps migrate seed sh lint fmt test test-unit test-integration test-up test-down smoke demo-traffic langfuse-check langfuse-model langfuse-trace
 
 help:
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -83,3 +83,24 @@ dlq-replay: ## вернуть сообщения из DLQ в очередь: mak
 
 chaos-embed: ## следующий батч эмбеддинга упадёт → ingest.embed.dlq (демо replay)
 	$(COMPOSE) exec worker-ingest rag-agents chaos-embed
+
+# --- Eval (ARCHITECTURE §15): одноразовый контейнер eval (профиль tools), отчёты в reports/eval
+EVAL_RUN := $(COMPOSE) --profile tools run --rm --user $$(id -u):$$(id -g) -e GIT_SHA=$$(git rev-parse --short HEAD) eval
+
+eval: ## eval-прогон: make eval AGENT=tolstoi DATASET=tolstoy CONFIG=dense [LIMIT=5] [JUDGE=0]
+	@mkdir -p reports/eval
+	$(EVAL_RUN) run --agent $(or $(AGENT),tolstoi) --dataset eval/datasets/$(or $(DATASET),tolstoy).jsonl \
+		--config configs/eval/$(or $(CONFIG),dense).yaml --limit $(or $(LIMIT),0) $(if $(filter 0,$(JUDGE)),--no-judge,)
+
+eval-diff: ## сравнить два прогона (95 % CI): make eval-diff A=<run_id> B=<run_id>
+	@mkdir -p reports/eval
+	$(EVAL_RUN) diff $(A) $(B)
+
+eval-export: ## дозалить прогон в Langfuse Datasets: make eval-export RUN=<run_id>
+	$(EVAL_RUN) export-langfuse $(RUN)
+
+eval-list: ## последние прогоны агента: make eval-list AGENT=tolstoi
+	$(EVAL_RUN) list --agent $(or $(AGENT),tolstoi)
+
+metrics: ## метрики Prometheus стенда (curl /metrics, только наши ряды)
+	@curl -s localhost:8080/metrics | grep -E '^(http_requests_total|rag_|llm_|ingest_|embed_batch|celery_queue_depth)' | grep -v '_created' | head -60

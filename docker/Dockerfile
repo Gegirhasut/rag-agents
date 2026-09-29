@@ -24,7 +24,7 @@ ARG BGE_M3_REVISION=5617a9f61b028005a4858fdac845db406aefb181
 ADD --chmod=644 https://huggingface.co/BAAI/bge-m3/resolve/${BGE_M3_REVISION}/tokenizer.json /opt/models/bge-m3/tokenizer.json
 # ADD --chmod применяет режим и к созданным каталогам (без +x) — возвращаем обход каталогов
 RUN chmod -R a+rX /opt/models \
-    && useradd --system --uid 10001 app && mkdir -p /data/uploads && chown -R app /data
+    && useradd --system --uid 10001 app && mkdir -p /data/uploads /data/metrics && chown -R app /data
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY alembic.ini ./

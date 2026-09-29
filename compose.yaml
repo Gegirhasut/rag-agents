@@ -28,6 +28,9 @@ x-app-env: &app-env
   # numpy/OpenBLAS по умолчанию запускает потоков по числу ядер хоста и на cgroup-квоте
   # контейнера упирается в троттлинг: PCA 653×1024 шла 59 с вместо долей секунды
   OPENBLAS_NUM_THREADS: "1"
+  # Prometheus multiprocess mode: web (2 процесса uvicorn) и воркеры пишут метрики в общий
+  # volume, /metrics в web суммирует все процессы (ARCHITECTURE §14.3)
+  PROMETHEUS_MULTIPROC_DIR: /data/metrics
 
 x-app: &app
   image: rag-agents:dev
@@ -40,6 +43,7 @@ x-app: &app
   environment: *app-env
   volumes:
     - uploads:/data/uploads
+    - metrics:/data/metrics
   restart: unless-stopped
 
 services:
@@ -266,6 +270,24 @@ services:
     mem_limit: 160m
     cpus: 0.1
 
+  # Eval-прогоны (make eval / eval-diff): одноразовый контейнер, профиль tools.
+  # Датасеты и конфиги монтируются из репозитория, отчёты пишутся в ./reports/eval.
+  # Метрики Prometheus eval-прогона в общий volume не пишем: это не пользовательский трафик.
+  # prometheus_client включает multiprocess-режим по наличию переменной (даже пустой), а ключ
+  # из YAML-anchor не удалить, поэтому переменная снимается в entrypoint через env -u
+  eval:
+    <<: *app
+    profiles: [tools]
+    entrypoint: ["env", "-u", "PROMETHEUS_MULTIPROC_DIR", "python", "-m", "rag_agents.eval"]
+    volumes:
+      - ./eval:/app/eval:ro
+      - ./configs:/app/configs:ro
+      - ./reports:/app/reports
+    depends_on: *worker-deps
+    restart: "no"
+    mem_limit: 384m
+    cpus: 1.0
+
   # --- Профиль debug: веб-админки для изучения стенда (make up-debug), ~450 МБ ---
   flower:
     image: mher/flower:2.0.1
@@ -322,6 +344,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  metrics:
   redisinsightdata:
   pgdata:
   redisdata:

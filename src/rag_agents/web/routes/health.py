@@ -1,7 +1,9 @@
+import anyio
 from fastapi import APIRouter
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy import text
 
+from rag_agents.core import metrics
 from rag_agents.web.deps import ContainerDep
 
 router = APIRouter()
@@ -38,3 +40,16 @@ async def readyz(c: ContainerDep) -> JSONResponse:
         checks["ollama"] = f"error: {type(e).__name__}"
     ok = all(v == "ok" for v in checks.values())
     return JSONResponse({"ready": ok, "checks": checks}, status_code=200 if ok else 503)
+
+
+@router.get("/metrics", include_in_schema=False)
+async def prometheus_metrics(c: ContainerDep) -> Response:
+    """Prometheus: все процессы web и воркеров (multiprocess) + глубина очередей RabbitMQ.
+
+    Без авторизации: локальный стенд, Prometheus ходит без сессии (ARCHITECTURE §14.3).
+    """
+    depths = await c.system.queue_depths()
+    body, content_type = await anyio.to_thread.run_sync(
+        lambda: metrics.render([metrics.QueueDepthCollector(depths)])
+    )
+    return Response(body, media_type=content_type)

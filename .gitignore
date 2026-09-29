@@ -26,3 +26,6 @@ models/
 .idea/
 .vscode/
 .DS_Store
+
+# Eval: отчёты генерируются; в git — только избранные (git add -f)
+reports/eval/*

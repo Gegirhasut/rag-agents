@@ -1,0 +1,14 @@
+Даны ВОПРОС, ЭТАЛОННЫЙ ОТВЕТ, КЛЮЧЕВЫЕ ФАКТЫ и ОТВЕТ системы.
+- "relevancy": 1 — ответ по существу отвечает на вопрос; 0.5 — частично или с лишним; 0 — не отвечает (в т.ч. отказ);
+- "facts_covered": для каждого ключевого факта по порядку — true, если ответ его содержит (смысл важнее формулировки) и не противоречит ему.
+
+Формат: {{"relevancy": 1, "facts_covered": [true, false]}}
+
+<question>{question}</question>
+<reference>{reference}</reference>
+<key_facts>
+{facts}
+</key_facts>
+<answer>
+{answer}
+</answer>
