@@ -20,6 +20,7 @@
     {% if principal %}
     <div class="d-flex align-items-center gap-3">
       <a class="nav-link small" href="/insights">📊 Аналитика</a>
+      <a class="nav-link small" href="/eval">🎯 Качество</a>
       {% if principal.is_admin %}<a class="nav-link small" href="/system">🔬 Под капотом</a>{% endif %}
       <a class="nav-link small" href="/settings/api-keys">🔑 API-ключи</a>
       <span class="navbar-text small text-secondary">{{ principal.email }}</span>

@@ -20,6 +20,7 @@ from rag_agents.domain.eval import (
     GoldenItem,
     RetrievedRef,
 )
+from rag_agents.domain.system import Node
 from rag_agents.eval.config import EvalConfig
 from rag_agents.eval.judge import JUDGE_VERSION, LLMJudge
 from rag_agents.eval.metrics import aggregate, mark_relevant, norm, retrieval_scores
@@ -27,6 +28,7 @@ from rag_agents.llm.prices import PriceTable
 from rag_agents.rag.prompting.citations import check_citations
 from rag_agents.services.eval import EvalService
 from rag_agents.services.query import QueryService
+from rag_agents.services.trace import TraceBus
 
 log = structlog.get_logger()
 
@@ -96,7 +98,9 @@ class EvalRunner:
         tracer: Tracer,
         prices: PriceTable,
         judge: LLMJudge | None,
+        trace: TraceBus | None = None,
     ) -> None:
+        self.trace = trace
         self.query = query
         self.store = store
         self.tracer = tracer
@@ -123,6 +127,12 @@ class EvalRunner:
             config=snapshot,
         )
         log.info("eval.started", run_id=str(run.id), agent_id=str(agent.id), items=len(items))
+        await self._emit(
+            "eval.started",
+            "postgres",
+            f"eval_runs: прогон «{config.name}», датасет {dataset}, вопросов: {len(items)}",
+            agent,
+        )
         sem = asyncio.Semaphore(config.concurrency)
 
         async def one(item: GoldenItem) -> _Scored:
@@ -138,6 +148,15 @@ class EvalRunner:
         summary = aggregate(results)
         summary["cost_usd"]["judge"] = sum(s.judge_cost for s in scored)
         run = await self.store.finish_run(agent.id, run.id, summary)
+        overall = summary["metrics"]
+        headline = ", ".join(
+            f"{k} {overall[k]['mean']:.2f}"
+            for k in ("hit@8", "faithfulness", "refusal_correct")
+            if k in overall and overall[k]["mean"] is not None
+        )
+        await self._emit(
+            "eval.finished", "postgres", f"Сводка прогона → eval_runs.metrics: {headline}", agent
+        )
         await asyncio.to_thread(self.tracer.flush)
         log.info("eval.finished", run_id=str(run.id))
         return run, results
@@ -169,6 +188,12 @@ class EvalRunner:
         self, run_id: UUID, agent: AgentOut, item: GoldenItem, config: EvalConfig
     ) -> _Scored:
         t0 = time.monotonic()
+        await self._emit(
+            "eval.question",
+            None,
+            f"Вопрос {item.id} ({item.category.value}) → тот же QueryService, что у пользователя",
+            agent,
+        )
         ans = await self._answer(run_id, agent, item, config)
         refs, scores = item_scores(item, ans)
         result = ans.result
@@ -180,6 +205,12 @@ class EvalRunner:
             and result is not None
             and not item.category.expects_refusal
         ):
+            await self._emit(
+                "eval.judge",
+                "llm",
+                f"Судья {JUDGE_VERSION} по {item.id}: faithfulness · context · answer (3 вызова)",
+                agent,
+            )
             verdict = await self.judge.evaluate(
                 item, result.answer_md, result.refused, ans.retrieved[: ans.context_k]
             )
@@ -207,7 +238,23 @@ class EvalRunner:
             cost_usd=usage.cost_usd if usage else None,
         )
         self._score_trace(out, run_id)
+        shown = ("hit@8", "faithfulness", "answer_relevancy", "refusal_correct")
+        await self._emit(
+            "eval.scored",
+            "postgres",
+            f"eval_items: {item.id} — "
+            + (
+                ", ".join(f"{k}={scores[k]:.2f}" for k in shown if scores.get(k) is not None)
+                or "без метрик"
+            ),
+            agent,
+        )
         return _Scored(out, judge_cost)
+
+    async def _emit(self, kind: str, dst: Node | None, label: str, agent: AgentOut) -> None:
+        """Шаг прогона на живой схеме /system (узел eval); без шины событий — ничего."""
+        if self.trace is not None:
+            await self.trace.emit(kind, "eval", dst, label, agent_id=agent.id)
 
     def _score_trace(self, item: EvalItemResult, run_id: UUID) -> None:
         if item.trace_id is None:

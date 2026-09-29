@@ -220,3 +220,15 @@ class ScriptedLLM:
         )
         yield LLMChunk(delta=text)
         yield LLMChunk(finish_reason="stop", usage=LLMUsage(input_tokens=50, output_tokens=10))
+
+
+class RecordingTraceBus:
+    """Шина живых событий /system без Redis: запоминает (kind, src, dst)."""
+
+    enabled = True
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, str | None]] = []
+
+    async def emit(self, kind: str, src: str, dst: str | None, label: str, **data: object) -> None:
+        self.events.append((kind, src, dst))

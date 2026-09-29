@@ -3,7 +3,8 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Literal
+from functools import partial
+from typing import Any, Literal
 from uuid import UUID
 
 import structlog
@@ -28,6 +29,7 @@ from rag_agents.domain.answers import (
 from rag_agents.domain.chats import MessageOut, MessagePair
 from rag_agents.domain.enums import MessageRole, MessageStatus
 from rag_agents.domain.eval import EvalAnswer
+from rag_agents.domain.system import Node
 from rag_agents.llm.base import LLMError, LLMProvider, LLMRequest, LLMUsage
 from rag_agents.llm.prices import CostBreakdown, PriceTable
 from rag_agents.rag.cleaning.orthography import norm_text
@@ -75,6 +77,9 @@ class _AnswerRun:
     message_id: UUID | None = None
     search_k: int = 0  # eval: сколько кандидатов достать для hit@k/recall@k (≥ top_k)
     retrieved: list[RetrievedChunk] = field(default_factory=list)
+    # Узлы живой схемы /system: прод — браузер → web, eval — контейнер eval без браузера
+    app_node: Node = "web"
+    client_node: Node | None = "browser"
 
 
 class QueryService:
@@ -217,6 +222,8 @@ class QueryService:
             tags=[agent.name, "eval"],
             metadata={"eval_run_id": str(run_id), "eval_item_id": item_id},
             search_k=search_k,
+            app_node="eval",
+            client_node=None,
         )
         result: QueryResult | None = None
         error: str | None = None
@@ -303,7 +310,8 @@ class QueryService:
         root = self._start_trace(agent, owner_id, run, question)
         generation: Span | None = None
         try:
-            await self.trace.emit(
+            await self._emit(
+                run,
                 "query.stream",
                 "browser",
                 "web",
@@ -313,15 +321,13 @@ class QueryService:
             chunks, t_embed, t_search = await self._retrieve(agent, question, root, run)
 
             if not chunks:
-                yield DoneEvent(
-                    result=await self._refuse(agent, message_id, root, t0, t_embed, t_search)
-                )
+                yield DoneEvent(result=await self._refuse(agent, run, root, t0, t_embed, t_search))
                 return
 
             citations, request = self._build_context(agent, question, chunks, root)
             t_retrieval = _ms(t0)
             yield SourcesEvent(citations=citations)
-            await self._trace_llm_call(agent.id, len(chunks))
+            await self._trace_llm_call(agent.id, run, len(chunks))
             generation = self._start_generation(root, request)
             llm_usage = LLMUsage()
             t_first: int | None = None
@@ -332,7 +338,7 @@ class QueryService:
                         metrics.RAG_STAGE_SECONDS.labels("ttft").observe(t_first / 1000)
                         # Langfuse считает TTFT от старта generation до completion_start_time
                         generation.update(completion_start_time=datetime.now(UTC))
-                        await self._trace_first_token(agent.id, t_first)
+                        await self._trace_first_token(agent.id, run, t_first)
                     parts.append(chunk.delta)
                     yield TokenEvent(delta=chunk.delta)
                 if chunk.usage:
@@ -353,10 +359,10 @@ class QueryService:
             await self._save(message_id, MessageStatus.DONE, result, root.trace_id)
             self._end_generation(generation, root, result, llm_usage, t_first, cost)
             self._observe_answer(result, llm_usage, cost, n_sources=len(citations))
-            await self._trace_done(agent.id, message_id, usage)
+            await self._trace_done(agent.id, run, usage)
             yield DoneEvent(result=result)
         except (LLMError, TransientError, PermanentError) as e:
-            yield await self._fail(e, agent.id, message_id, parts, citations, root, generation)
+            yield await self._fail(e, agent.id, run, parts, citations, root, generation)
         except (asyncio.CancelledError, GeneratorExit):
             # Клиент закрыл вкладку: сохраняем то, что успели, и отпускаем отмену дальше
             await asyncio.shield(
@@ -400,18 +406,19 @@ class QueryService:
         self,
         e: LLMError | TransientError | PermanentError,
         agent_id: UUID,
-        message_id: UUID | None,
+        run: _AnswerRun,
         parts: list[str],
         citations: list[Citation],
         root: Span,
         generation: Span | None,
     ) -> ErrorEvent:
+        message_id = run.message_id
         log.warning("query.failed", message_id=str(message_id), error=str(e))
         if isinstance(e, LLMError):
             code = str(e.status) if e.status else "timeout_or_transport"
             metrics.LLM_ERRORS.labels(self.llm.name, code).inc()
-        await self.trace.emit(
-            "query.failed", "web", "browser", f"Ошибка: {type(e).__name__}", agent_id=agent_id
+        await self._emit(
+            run, "query.failed", "web", "browser", f"Ошибка: {type(e).__name__}", agent_id=agent_id
         )
         await self._save_partial(message_id, MessageStatus.ERROR, parts, citations, root.trace_id)
         status_message = f"{type(e).__name__}: {e}"[:500]
@@ -550,7 +557,7 @@ class QueryService:
     async def _refuse(
         self,
         agent: AgentOut,
-        message_id: UUID | None,
+        run: _AnswerRun,
         root: Span,
         t0: float,
         t_embed: int,
@@ -575,24 +582,43 @@ class QueryService:
             usage=usage,
             trace_id=root.trace_id if self.tracer.enabled else None,
         )
-        await self._save(message_id, MessageStatus.DONE, result, root.trace_id)
+        await self._save(run.message_id, MessageStatus.DONE, result, root.trace_id)
         root.end(output=REFUSAL_TEXT, metadata={"refused": True, "reason": "no_chunks"})
         metrics.RAG_ANSWERS.labels("true", "true", "false", "none", "false").inc()
         metrics.RAG_STAGE_SECONDS.labels("total").observe(t_total / 1000)
-        await self.trace.emit(
-            "query.refused", "web", "browser", "Ничего не найдено → отказ", agent_id=agent.id
+        await self._emit(
+            run, "query.refused", "web", "browser", "Ничего не найдено → отказ", agent_id=agent.id
         )
         return result
 
-    async def _trace_llm_call(self, agent_id: UUID, n_chunks: int) -> None:
-        await self.trace.emit(
+    async def _emit(
+        self,
+        run: _AnswerRun,
+        kind: str,
+        src: Node,
+        dst: Node | None,
+        label: str,
+        **data: Any,  # Any: JSON-детали события, как у TraceBus.emit
+    ) -> None:
+        """Событие живой схемы от имени прогона: у eval узел web → eval, событий браузеру нет."""
+        nodes: dict[str, Node | None] = {"web": run.app_node, "browser": run.client_node}
+        s = nodes.get(src, src)
+        d = nodes.get(dst, dst) if dst is not None else None
+        if s is None or (dst is not None and d is None):
+            return
+        await self.trace.emit(kind, s, d, label, **data)
+
+    async def _trace_llm_call(self, agent_id: UUID, run: _AnswerRun, n_chunks: int) -> None:
+        await self._emit(
+            run,
             "query.sources",
             "web",
             "browser",
             "SSE event: sources (карточки цитат)",
             agent_id=agent_id,
         )
-        await self.trace.emit(
+        await self._emit(
+            run,
             "query.llm",
             "web",
             "llm",
@@ -601,15 +627,17 @@ class QueryService:
             agent_id=agent_id,
         )
 
-    async def _trace_first_token(self, agent_id: UUID, t_first: int) -> None:
-        await self.trace.emit(
+    async def _trace_first_token(self, agent_id: UUID, run: _AnswerRun, t_first: int) -> None:
+        await self._emit(
+            run,
             "query.first_token",
             "llm",
             "web",
             f"Первый токен через {t_first} мс от вопроса",
             agent_id=agent_id,
         )
-        await self.trace.emit(
+        await self._emit(
+            run,
             "query.tokens",
             "web",
             "browser",
@@ -617,12 +645,10 @@ class QueryService:
             agent_id=agent_id,
         )
 
-    async def _trace_done(
-        self, agent_id: UUID, message_id: UUID | None, usage: AnswerUsage
-    ) -> None:
+    async def _trace_done(self, agent_id: UUID, run: _AnswerRun, usage: AnswerUsage) -> None:
         log.info(
             "query.done",
-            message_id=str(message_id),
+            message_id=str(run.message_id),
             ttft_ms=usage.t_first_token_ms,
             total_ms=usage.t_total_ms,
             input_tokens=usage.input_tokens,
@@ -630,16 +656,31 @@ class QueryService:
             reasoning_tokens=usage.reasoning_tokens,
             cost_usd=usage.cost_usd,
         )
-        await self.trace.emit(
+        tokens = (
+            f"{usage.input_tokens} вх. / {usage.output_tokens} вых. токенов, {usage.t_total_ms} мс"
+        )
+        # eval ответ в чат не пишет: событие остаётся внутри узла eval
+        saved = run.message_id is not None
+        await self._emit(
+            run,
             "query.done",
             "web",
-            "postgres",
-            f"Ответ сохранён: {usage.input_tokens} вх. / {usage.output_tokens} вых. токенов, "
-            f"{usage.t_total_ms} мс",
+            "postgres" if saved else None,
+            f"Ответ сохранён: {tokens}" if saved else f"Ответ готов: {tokens}",
             agent_id=agent_id,
             usage=usage.model_dump(),
         )
-        await self.trace.emit(
+        if self.tracer.enabled:
+            await self._emit(
+                run,
+                "query.traced",
+                "web",
+                "langfuse",
+                "Трейс вопроса уходит фоном в Langfuse (OTel batch)",
+                agent_id=agent_id,
+            )
+        await self._emit(
+            run,
             "query.finish",
             "web",
             "browser",
@@ -655,7 +696,7 @@ class QueryService:
         Для eval достаётся больше кандидатов (run.search_k): они нужны метрикам hit@20,
         в промпт по-прежнему идут первые top_k — ответ тот же, что у пользователя.
         """
-        emit = self.trace.emit
+        emit = partial(self._emit, run)
         collection = await self._collection(agent)
         await emit(
             "query.embed",

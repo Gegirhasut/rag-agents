@@ -133,6 +133,7 @@ svg .bold { font-weight: 700; }
     <li><a href="#arch">Архитектура</a></li>
     <li><a href="#ingest">Документ → векторы</a></li>
     <li><a href="#query">Вопрос → ответ</a></li>
+    <li><a href="#eval">Как меряем качество (eval)</a></li>
     <li><a href="#prompt">Промпт и защита от выдумок</a></li>
     <li><a href="#stack">Весь стек: что, зачем, почему</a></li>
     <li><a href="#metrics">Метрики и наблюдаемость</a></li>
@@ -162,22 +163,27 @@ svg .bold { font-weight: 700; }
 
   <div class="grid2">
     <div class="card"><h4>Что умеет сейчас <span class="badge b-ok">работает</span></h4>
-      <p>Агенты, загрузка txt (любая кодировка), фоновая индексация через очередь, семантический поиск
-        в Qdrant, ответ DeepSeek потоком с цитатами, 👍/👎, трейсы в Langfuse, страница «Аналитика»,
-        учебная страница «Под капотом» с живой схемой.</p></div>
+      <p><b>Доступ:</b> вход по паролю (серверные сессии в Redis, CSRF), JSON API <code>/api/v1</code> с API-ключами,
+        rate limit. <b>Книги:</b> txt, fb2, epub, pdf, docx; структурный чанкер по главам; раздельные очереди
+        <code>ingest.parse</code> и <code>ingest.embed</code> с фан-аутом батчей, sweeper на beat, DLQ и <code>make dlq-replay</code>.
+        <b>Ответы:</b> семантический поиск в Qdrant, DeepSeek потоком с цитатами, 👍/👎.
+        <b>Наблюдаемость и качество:</b> трейсы в Langfuse, <code>/metrics</code> для Prometheus, eval-харнесс
+        с LLM-судьёй и страница «Качество», «Аналитика», учебная страница «Под капотом» с живой схемой.</p></div>
     <div class="card"><h4>Что спроектировано <span class="badge b-plan">в плане</span></h4>
-      <p>Вход по паролю и API-ключи, форматы fb2/epub/pdf/docx, гибридный поиск (векторы + BM25),
-        reranker, порог отказа, eval-харнесс с метриками качества, сравнение с LlamaIndex,
-        fallback на Claude/OpenAI, чаты с историей, Prometheus.</p></div>
+      <p>Гибридный поиск (векторы + BM25), reranker на CPU, порог отказа, откалиброванный на eval,
+        честное сравнение с LlamaIndex на том же датасете, fallback на Claude/OpenAI, семантический кэш,
+        чаты с историей и уточняющими вопросами.</p></div>
   </div>
 
   <div class="stats">
     <div class="stat"><div class="v">Python 3.12</div><div class="l">FastAPI · Celery · SQLAlchemy</div></div>
-    <div class="stat"><div class="v">7</div><div class="l">сервисов в Docker Compose</div></div>
+    <div class="stat"><div class="v">9 + 1</div><div class="l">сервисов в Compose (+ eval в профиле tools)</div></div>
     <div class="stat"><div class="v">1024</div><div class="l">измерения вектора (bge-m3)</div></div>
     <div class="stat"><div class="v">~1.8 с</div><div class="l">до первого слова ответа (p50)</div></div>
     <div class="stat"><div class="v">~$0.001</div><div class="l">стоимость одного ответа</div></div>
-    <div class="stat"><div class="v">~35 с</div><div class="l">индексация «Исповеди» (161 фрагмент)</div></div>
+    <div class="stat"><div class="v">~17 мин</div><div class="l">«Война и мир», 4 тома fb2 → 2873 чанка</div></div>
+    <div class="stat"><div class="v">0.833</div><div class="l">hit@8 baseline <code>dense</code> (59 вопросов)</div></div>
+    <div class="stat"><div class="v">0.95</div><div class="l">faithfulness ответов (LLM-судья)</div></div>
   </div>
 </section>
 
@@ -248,112 +254,137 @@ svg .bold { font-weight: 700; }
 <!-- ============================ 3. ARCH ============================ -->
 <section id="arch">
   <h2>Архитектура: кто с кем разговаривает</h2>
-  <p class="lead">Два главных процесса нашего кода — <b>web</b> (отвечает пользователю) и <b>worker</b>
-    (индексирует книги в фоне). Вокруг — хранилища и внешние API.</p>
+  <p class="lead">Процессы нашего кода — <b>web</b> (отвечает людям и программам), два воркера (<b>worker-ingest</b> парсит,
+    <b>worker-embed</b> считает векторы), <b>beat</b> (расписание) и одноразовый <b>eval</b> (меряет качество).
+    Вокруг — хранилища и внешние API.</p>
 
   <figure>
-    <svg viewBox="0 0 1000 600" role="img" aria-label="Схема сервисов">
+    <svg viewBox="0 0 1000 700" role="img" aria-label="Схема сервисов">
       <g font-size="13">
-      <rect x="6" y="6" width="988" height="588" rx="14" class="zone" opacity=".35"/>
+      <rect x="6" y="6" width="988" height="688" rx="14" class="zone" opacity=".35"/>
       <text x="22" y="30" class="muted" font-size="12">Docker Compose на VM (Ubuntu, 8 ГБ RAM, без GPU)</text>
 
-      <!-- column headers -->
-      <text x="330" y="62" text-anchor="middle" class="muted" font-size="12">НАШ КОД</text>
-      <text x="665" y="62" text-anchor="middle" class="muted" font-size="12">ХРАНИЛИЩА</text>
-      <text x="895" y="62" text-anchor="middle" class="muted" font-size="12">ВНЕШНИЕ СЕРВИСЫ</text>
+      <text x="330" y="66" text-anchor="middle" class="muted" font-size="12">НАШ КОД (один образ)</text>
+      <text x="665" y="66" text-anchor="middle" class="muted" font-size="12">ХРАНИЛИЩА</text>
+      <text x="895" y="66" text-anchor="middle" class="muted" font-size="12">ВНЕШНИЕ СЕРВИСЫ</text>
 
-      <!-- browser -->
-      <rect x="24" y="190" width="130" height="92" rx="12" class="box"/>
-      <text x="89" y="222" text-anchor="middle" class="bold">🌐 Браузер</text>
-      <text x="89" y="244" text-anchor="middle" font-size="12" class="muted">HTML + HTMX</text>
-      <text x="89" y="262" text-anchor="middle" font-size="12" class="muted">Bootstrap</text>
-      <line x1="154" y1="225" x2="226" y2="225" class="arrow web" marker-end="url(#ah)"/>
-      <line x1="228" y1="252" x2="156" y2="252" class="arrow web" marker-end="url(#ah)"/>
-      <text x="190" y="216" text-anchor="middle" font-size="11" class="muted">HTTP</text>
-      <text x="190" y="270" text-anchor="middle" font-size="11" class="muted">SSE</text>
+      <!-- client -->
+      <rect x="24" y="150" width="140" height="100" rx="12" class="box"/>
+      <text x="94" y="180" text-anchor="middle" class="bold">🌐 Браузер</text>
+      <text x="94" y="200" text-anchor="middle" font-size="12" class="muted">HTMX + Bootstrap</text>
+      <text x="94" y="222" text-anchor="middle" class="bold" font-size="12.5">🔑 API-клиент</text>
+      <text x="94" y="240" text-anchor="middle" font-size="11.5" class="muted">Bearer rag_…</text>
+      <line x1="164" y1="185" x2="226" y2="185" class="arrow web" marker-end="url(#ah)"/>
+      <line x1="228" y1="215" x2="166" y2="215" class="arrow web" marker-end="url(#ah)"/>
+      <text x="195" y="177" text-anchor="middle" font-size="11" class="muted">HTTP</text>
+      <text x="195" y="232" text-anchor="middle" font-size="11" class="muted">SSE</text>
 
       <!-- web -->
-      <rect x="230" y="150" width="200" height="170" rx="12" class="box s-web" stroke-width="2.5"/>
-      <rect x="230" y="150" width="200" height="32" rx="12" class="k-web"/>
-      <text x="330" y="171" text-anchor="middle" style="fill:#fff" class="bold">web</text>
-      <text x="330" y="206" text-anchor="middle">FastAPI + Uvicorn</text>
-      <text x="330" y="228" text-anchor="middle" font-size="12" class="muted">страницы (Jinja2)</text>
-      <text x="330" y="246" text-anchor="middle" font-size="12" class="muted">SSE-стрим ответа</text>
-      <text x="330" y="264" text-anchor="middle" font-size="12" class="muted">поиск + промпт + LLM</text>
-      <text x="330" y="282" text-anchor="middle" font-size="12" class="muted">/insights, /system</text>
-      <text x="330" y="304" text-anchor="middle" font-size="11" class="muted">1 процесс, async</text>
+      <rect x="230" y="100" width="200" height="180" rx="12" class="box s-web" stroke-width="2.5"/>
+      <rect x="230" y="100" width="200" height="32" rx="12" class="k-web"/>
+      <text x="330" y="121" text-anchor="middle" style="fill:#fff" class="bold">web</text>
+      <text x="330" y="154" text-anchor="middle">FastAPI + Uvicorn ×2</text>
+      <text x="330" y="175" text-anchor="middle" font-size="12" class="muted">страницы + SSE-стрим</text>
+      <text x="330" y="193" text-anchor="middle" font-size="12" class="muted">JSON API /api/v1</text>
+      <text x="330" y="211" text-anchor="middle" font-size="12" class="muted">сессии · CSRF · rate limit</text>
+      <text x="330" y="229" text-anchor="middle" font-size="12" class="muted">поиск + промпт + LLM</text>
+      <text x="330" y="247" text-anchor="middle" font-size="12" class="muted">/metrics · /insights · /eval</text>
+      <text x="330" y="268" text-anchor="middle" font-size="11" class="muted">async, 448 МБ</text>
 
-      <!-- worker -->
-      <rect x="230" y="400" width="200" height="140" rx="12" class="box s-worker" stroke-width="2.5"/>
-      <rect x="230" y="400" width="200" height="32" rx="12" class="k-worker"/>
-      <text x="330" y="421" text-anchor="middle" style="fill:#fff" class="bold">worker</text>
-      <text x="330" y="456" text-anchor="middle">Celery (prefork)</text>
-      <text x="330" y="478" text-anchor="middle" font-size="12" class="muted">парсинг → чанки →</text>
-      <text x="330" y="496" text-anchor="middle" font-size="12" class="muted">эмбеддинги → Qdrant</text>
-      <text x="330" y="520" text-anchor="middle" font-size="11" class="muted">тот же образ, другая команда</text>
+      <!-- workers -->
+      <rect x="230" y="318" width="200" height="68" rx="12" class="box s-worker" stroke-width="2.5"/>
+      <rect x="230" y="318" width="8" height="68" rx="4" class="k-worker"/>
+      <text x="336" y="342" text-anchor="middle" class="bold">worker-ingest</text>
+      <text x="336" y="362" text-anchor="middle" font-size="12" class="muted">парсинг 5 форматов →</text>
+      <text x="336" y="378" text-anchor="middle" font-size="12" class="muted">чанки → фан-аут батчей</text>
+      <rect x="230" y="400" width="200" height="68" rx="12" class="box s-worker" stroke-width="2.5"/>
+      <rect x="230" y="400" width="8" height="68" rx="4" class="k-worker"/>
+      <text x="336" y="424" text-anchor="middle" class="bold">worker-embed</text>
+      <text x="336" y="444" text-anchor="middle" font-size="12" class="muted">батч 32 чанка → вектор</text>
+      <text x="336" y="460" text-anchor="middle" font-size="12" class="muted">→ upsert в Qdrant</text>
+      <rect x="230" y="482" width="200" height="50" rx="12" class="box s-worker" stroke-width="2"/>
+      <text x="330" y="503" text-anchor="middle" class="bold">⏱ beat</text>
+      <text x="330" y="521" text-anchor="middle" font-size="12" class="muted">раз в минуту: sweeper</text>
+
+      <!-- eval -->
+      <rect x="230" y="572" width="200" height="98" rx="12" class="box s-obs" stroke-width="2" stroke-dasharray="6 4"/>
+      <text x="330" y="597" text-anchor="middle" class="bold">🎯 eval (make eval)</text>
+      <text x="330" y="616" text-anchor="middle" font-size="12" class="muted">одноразовый, профиль tools</text>
+      <text x="330" y="634" text-anchor="middle" font-size="12" class="muted">вызывает QueryService</text>
+      <text x="330" y="652" text-anchor="middle" font-size="12" class="muted">напрямую, как web</text>
 
       <!-- stores -->
-      <rect x="580" y="80" width="170" height="64" rx="12" class="box s-data" stroke-width="2"/>
-      <text x="665" y="106" text-anchor="middle" class="bold">🐘 PostgreSQL 16</text>
-      <text x="665" y="126" text-anchor="middle" font-size="11.5" class="muted">агенты, книги, чанки, чаты</text>
-      <rect x="580" y="200" width="170" height="64" rx="12" class="box s-data" stroke-width="2"/>
-      <text x="665" y="226" text-anchor="middle" class="bold">⚡ Redis</text>
-      <text x="665" y="246" text-anchor="middle" font-size="11.5" class="muted">прогресс, кэш, pub/sub</text>
-      <rect x="580" y="330" width="170" height="64" rx="12" class="box s-data" stroke-width="2"/>
-      <text x="665" y="356" text-anchor="middle" class="bold">🐇 RabbitMQ</text>
-      <text x="665" y="376" text-anchor="middle" font-size="11.5" class="muted">очередь задач + DLQ</text>
-      <rect x="580" y="460" width="170" height="64" rx="12" class="box s-ai" stroke-width="2"/>
-      <text x="665" y="486" text-anchor="middle" class="bold">🧭 Qdrant</text>
-      <text x="665" y="506" text-anchor="middle" font-size="11.5" class="muted">векторы чанков</text>
+      <rect x="580" y="78" width="170" height="64" rx="12" class="box s-data" stroke-width="2"/>
+      <text x="665" y="104" text-anchor="middle" class="bold">🐘 PostgreSQL 16</text>
+      <text x="665" y="124" text-anchor="middle" font-size="11.5" class="muted">агенты, книги, чанки, eval</text>
+      <rect x="580" y="186" width="170" height="64" rx="12" class="box s-data" stroke-width="2"/>
+      <text x="665" y="212" text-anchor="middle" class="bold">⚡ Redis</text>
+      <text x="665" y="232" text-anchor="middle" font-size="11.5" class="muted">сессии, rate limit, прогресс</text>
+      <rect x="580" y="318" width="170" height="68" rx="12" class="box s-data" stroke-width="2"/>
+      <text x="665" y="342" text-anchor="middle" class="bold">🐇 RabbitMQ</text>
+      <text x="665" y="360" text-anchor="middle" font-size="11.5" class="muted">ingest.parse · ingest.embed</text>
+      <text x="665" y="376" text-anchor="middle" font-size="11.5" class="muted">maintenance + *.dlq</text>
+      <rect x="580" y="452" width="170" height="64" rx="12" class="box s-ai" stroke-width="2"/>
+      <text x="665" y="478" text-anchor="middle" class="bold">🧭 Qdrant</text>
+      <text x="665" y="498" text-anchor="middle" font-size="11.5" class="muted">векторы чанков</text>
 
       <!-- external -->
-      <rect x="815" y="100" width="160" height="70" rx="12" class="box s-ext" stroke-width="2"/>
-      <text x="895" y="128" text-anchor="middle" class="bold">🤖 DeepSeek</text>
-      <text x="895" y="150" text-anchor="middle" font-size="11.5" class="muted">LLM: текст ответа</text>
+      <rect x="815" y="92" width="160" height="70" rx="12" class="box s-ext" stroke-width="2"/>
+      <text x="895" y="120" text-anchor="middle" class="bold">🤖 DeepSeek</text>
+      <text x="895" y="142" text-anchor="middle" font-size="11.5" class="muted">ответ + LLM-судья</text>
       <rect x="815" y="280" width="160" height="78" rx="12" class="box s-ai" stroke-width="2"/>
       <text x="895" y="306" text-anchor="middle" class="bold">🦙 Ollama · bge-m3</text>
       <text x="895" y="326" text-anchor="middle" font-size="11.5" class="muted">текст → вектор</text>
       <text x="895" y="344" text-anchor="middle" font-size="11" class="muted">(на Windows-хосте)</text>
-      <rect x="815" y="460" width="160" height="78" rx="12" class="box s-obs" stroke-width="2"/>
-      <text x="895" y="486" text-anchor="middle" class="bold">🔭 Langfuse</text>
-      <text x="895" y="506" text-anchor="middle" font-size="11.5" class="muted">трейсы, стоимость,</text>
-      <text x="895" y="524" text-anchor="middle" font-size="11.5" class="muted">оценки (Cloud)</text>
+      <rect x="815" y="470" width="160" height="78" rx="12" class="box s-obs" stroke-width="2"/>
+      <text x="895" y="496" text-anchor="middle" class="bold">🔭 Langfuse</text>
+      <text x="895" y="516" text-anchor="middle" font-size="11.5" class="muted">трейсы, стоимость,</text>
+      <text x="895" y="534" text-anchor="middle" font-size="11.5" class="muted">eval-датасеты (Cloud)</text>
 
-      <!-- web → stores: from right edge -->
-      <line x1="430" y1="165" x2="576" y2="115" class="arrow web" marker-end="url(#ah)"/>
-      <line x1="430" y1="200" x2="576" y2="228" class="arrow web" marker-end="url(#ah)"/>
-      <line x1="430" y1="275" x2="576" y2="352" class="arrow web" marker-end="url(#ah)"/>
-      <line x1="430" y1="300" x2="576" y2="478" class="arrow web" marker-end="url(#ah)"/>
-      <text x="470" y="330" font-size="11" class="muted" transform="rotate(28 470 330)">задача: только id</text>
-      <!-- worker → stores -->
+      <!-- web → stores -->
+      <line x1="430" y1="118" x2="576" y2="108" class="arrow web" marker-end="url(#ah)"/>
+      <line x1="430" y1="200" x2="576" y2="215" class="arrow web" marker-end="url(#ah)"/>
+      <line x1="430" y1="250" x2="576" y2="335" class="arrow web" marker-end="url(#ah)"/>
+      <line x1="430" y1="268" x2="576" y2="462" class="arrow web" marker-end="url(#ah)"/>
+      <!-- rabbit → workers, beat → rabbit -->
+      <line x1="576" y1="345" x2="434" y2="350" class="arrow worker" marker-end="url(#ah)"/>
       <line x1="576" y1="372" x2="434" y2="430" class="arrow worker" marker-end="url(#ah)"/>
-      <line x1="430" y1="480" x2="576" y2="492" class="arrow worker" marker-end="url(#ah)"/>
-      <line x1="430" y1="410" x2="576" y2="248" class="arrow worker" marker-end="url(#ah)" opacity=".75"/>
-      <line x1="430" y1="405" x2="576" y2="135" class="arrow worker" marker-end="url(#ah)" opacity=".75"/>
-      <!-- external: routed above/below the store column -->
-      <path d="M430 158 C 520 60, 760 60, 811 128" class="arrow ext" marker-end="url(#ah)"/>
-      <path d="M430 188 C 500 180, 520 170, 560 170 L 770 170 C 790 170, 795 300, 811 305" class="arrow ai" marker-end="url(#ah)"/>
-      <path d="M430 520 C 520 560, 770 440, 811 332" class="arrow ai" marker-end="url(#ah)"/>
-      <path d="M430 530 C 560 585, 760 585, 811 520" class="arrow obs" marker-end="url(#ah)"/>
-      <path d="M430 310 C 500 440, 560 435, 570 430 L 790 430 C 805 430, 808 470, 811 480" class="arrow obs" marker-end="url(#ah)"/>
-      <text x="640" y="578" font-size="11" class="muted" text-anchor="middle">трейсы уходят фоном</text>
+      <line x1="430" y1="505" x2="576" y2="382" class="arrow worker" marker-end="url(#ah)" opacity=".8"/>
+      <!-- workers → stores -->
+      <line x1="430" y1="326" x2="576" y2="132" class="arrow worker" marker-end="url(#ah)" opacity=".75"/>
+      <line x1="430" y1="334" x2="576" y2="242" class="arrow worker" marker-end="url(#ah)" opacity=".75"/>
+      <line x1="430" y1="452" x2="576" y2="484" class="arrow worker" marker-end="url(#ah)"/>
+      <!-- eval → stores -->
+      <line x1="430" y1="590" x2="576" y2="506" class="arrow" marker-end="url(#ah)"/>
+      <!-- external -->
+      <path d="M430 108 C 520 14, 760 14, 811 108" class="arrow ext" marker-end="url(#ah)"/>
+      <path d="M430 222 C 500 222, 520 285, 570 285 L 790 285 C 800 285, 805 300, 811 305" class="arrow ai" marker-end="url(#ah)"/>
+      <path d="M430 460 C 490 460, 510 420, 570 420 L 790 420 C 802 420, 806 360, 811 345" class="arrow ai" marker-end="url(#ah)"/>
+      <path d="M430 612 C 600 612, 770 600, 811 530" class="arrow obs" marker-end="url(#ah)"/>
+      <path d="M430 276 C 470 300, 465 548, 560 548 L 790 548 C 800 548, 805 540, 811 535" class="arrow obs" marker-end="url(#ah)"/>
+      <text x="640" y="564" font-size="11" class="muted" text-anchor="middle">трейсы уходят фоном</text>
+      <text x="665" y="655" font-size="11.5" class="muted" text-anchor="middle">eval тоже ходит в Ollama, DeepSeek и PG —</text>
+      <text x="665" y="671" font-size="11.5" class="muted" text-anchor="middle">через тот же QueryService, стрелки не рисуем</text>
+      <text x="665" y="403" font-size="11" class="muted" text-anchor="middle">в сообщении только id</text>
 
       <!-- legend -->
       <g font-size="11.5">
-        <line x1="24" y1="360" x2="54" y2="360" class="arrow web"/><text x="60" y="364">запросы web</text>
-        <line x1="24" y1="382" x2="54" y2="382" class="arrow worker"/><text x="60" y="386">работа worker</text>
-        <line x1="24" y1="404" x2="54" y2="404" class="arrow ai"/><text x="60" y="408">эмбеддинги</text>
-        <line x1="24" y1="426" x2="54" y2="426" class="arrow ext"/><text x="60" y="430">LLM</text>
-        <line x1="24" y1="448" x2="54" y2="448" class="arrow obs"/><text x="60" y="452">наблюдаемость</text>
+        <line x1="24" y1="330" x2="54" y2="330" class="arrow web"/><text x="60" y="334">запросы web</text>
+        <line x1="24" y1="352" x2="54" y2="352" class="arrow worker"/><text x="60" y="356">работа воркеров</text>
+        <line x1="24" y1="374" x2="54" y2="374" class="arrow ai"/><text x="60" y="378">эмбеддинги</text>
+        <line x1="24" y1="396" x2="54" y2="396" class="arrow ext"/><text x="60" y="400">LLM</text>
+        <line x1="24" y1="418" x2="54" y2="418" class="arrow obs"/><text x="60" y="422">наблюдаемость</text>
+        <line x1="24" y1="440" x2="54" y2="440" class="arrow"/><text x="60" y="444">eval-прогон</text>
       </g>
       </g>
     </svg>
-    <figcaption>Компоненты. web и worker — один и тот же Docker-образ с разными командами запуска.</figcaption>
+    <figcaption>Компоненты. web, оба воркера, beat, migrate и eval — один Docker-образ с разными командами запуска.
+      Воркеры разделены по очередям: тяжёлый парсинг не блокирует эмбеддинги и наоборот.</figcaption>
   </figure>
 
   <h3>Слои внутри кода (как в Laravel: Controller → Service → Repository)</h3>
   <figure>
-    <svg viewBox="0 0 900 250" role="img" aria-label="Слои кода">
+    <svg viewBox="0 0 900 320" role="img" aria-label="Слои кода">
       <rect x="20" y="20" width="200" height="56" rx="10" class="box s-web" stroke-width="2"/>
       <text x="120" y="45" text-anchor="middle" class="bold">web/ · api/</text>
       <text x="120" y="63" text-anchor="middle" font-size="11" class="muted">роуты, шаблоны, SSE</text>
@@ -375,125 +406,164 @@ svg .bold { font-weight: 700; }
 
       <line x1="220" y1="48" x2="316" y2="76" class="arrow" marker-end="url(#ah)"/>
       <line x1="220" y1="124" x2="316" y2="98" class="arrow" marker-end="url(#ah)"/>
+      <rect x="20" y="172" width="200" height="56" rx="10" class="box s-obs" stroke-width="2" stroke-dasharray="6 4"/>
+      <text x="120" y="197" text-anchor="middle" class="bold">eval/</text>
+      <text x="120" y="215" text-anchor="middle" font-size="11" class="muted">runner, метрики, судья</text>
+      <line x1="220" y1="196" x2="316" y2="112" class="arrow" marker-end="url(#ah)"/>
       <line x1="570" y1="74" x2="646" y2="34" class="arrow" marker-end="url(#ah)"/>
       <line x1="570" y1="86" x2="646" y2="86" class="arrow" marker-end="url(#ah)"/>
       <line x1="570" y1="98" x2="646" y2="138" class="arrow" marker-end="url(#ah)"/>
 
-      <rect x="20" y="186" width="860" height="48" rx="10" class="zone"/>
-      <text x="40" y="208" font-size="13"><tspan class="bold">domain/</tspan> — Pydantic-модели (DTO), общие для всех слоёв.
+      <rect x="20" y="252" width="860" height="56" rx="10" class="zone"/>
+      <text x="40" y="276" font-size="13"><tspan class="bold">domain/</tspan> — Pydantic-модели (DTO), общие для всех слоёв.
         <tspan class="bold">core/</tspan> — настройки, БД, логи, трейсинг.</text>
-      <text x="40" y="226" font-size="12" class="muted">Правило проверяет import-linter в CI: роуты не ходят в БД и в LLM напрямую, ORM-модели не выходят из repositories.</text>
+      <text x="40" y="296" font-size="12" class="muted">import-linter (make lint): роуты не ходят в БД и LLM напрямую, eval — только через services.</text>
     </svg>
-    <figcaption>Зависимости идут только слева направо. Это позволяет тестировать сервисы с подменёнными хранилищами.</figcaption>
+    <figcaption>Зависимости идут только слева направо. eval — ещё один клиент сервисов, как web и воркеры: он меряет ровно тот конвейер, что отвечает пользователю.</figcaption>
   </figure>
 </section>
 
 <!-- ============================ 4. INGEST ============================ -->
 <section id="ingest">
   <h2>Workflow 1. Как книга становится векторами</h2>
-  <p class="lead">Загрузка возвращается мгновенно, а тяжёлая работа идёт в фоне. Пользователь видит
-    прогресс-бар, который обновляется каждые 2 секунды.</p>
+  <p class="lead">Загрузка возвращается мгновенно, тяжёлая работа идёт в фоне на двух разных воркерах.
+    Пользователь видит стадию и прогресс-бар, которые обновляются каждые 2 секунды.</p>
 
   <figure>
-    <svg viewBox="0 0 980 330" role="img" aria-label="Пайплайн индексации">
+    <svg viewBox="0 0 980 500" role="img" aria-label="Пайплайн индексации с фан-аутом батчей">
       <g font-size="12">
         <!-- row 1: web -->
         <text x="20" y="28" class="bold" style="fill:var(--c-web)">В запросе пользователя (web, ~100 мс)</text>
         <rect x="20" y="40" width="170" height="74" rx="10" class="box s-web"/>
         <text x="105" y="64" text-anchor="middle" class="bold">① Загрузка</text>
-        <text x="105" y="82" text-anchor="middle" class="muted">поток на диск</text>
-        <text x="105" y="98" text-anchor="middle" class="muted">+ sha256</text>
+        <text x="105" y="82" text-anchor="middle" class="muted" font-size="11">поток на диск + sha256</text>
+        <text x="105" y="98" text-anchor="middle" class="muted" font-size="10.5">txt · fb2 · epub · pdf · docx</text>
         <rect x="230" y="40" width="170" height="74" rx="10" class="box s-data"/>
         <text x="315" y="64" text-anchor="middle" class="bold">② PostgreSQL</text>
         <text x="315" y="82" text-anchor="middle" class="muted">documents: queued</text>
         <text x="315" y="98" text-anchor="middle" class="muted">дубль файла → стоп</text>
         <rect x="440" y="40" width="170" height="74" rx="10" class="box s-data"/>
-        <text x="525" y="64" text-anchor="middle" class="bold">③ RabbitMQ</text>
+        <text x="525" y="64" text-anchor="middle" class="bold">③ ingest.parse</text>
         <text x="525" y="82" text-anchor="middle" class="muted">задача {document_id}</text>
         <text x="525" y="98" text-anchor="middle" class="muted">после COMMIT</text>
         <rect x="650" y="40" width="310" height="74" rx="10" class="zone"/>
         <text x="805" y="64" text-anchor="middle" class="bold">Браузер получает строку «queued»</text>
-        <text x="805" y="84" text-anchor="middle" class="muted">и опрашивает статус каждые 2 с;</text>
+        <text x="805" y="84" text-anchor="middle" class="muted">и опрашивает стадию каждые 2 с;</text>
         <text x="805" y="100" text-anchor="middle" class="muted">HTTP 286 = «всё готово, хватит опрашивать»</text>
         <line x1="190" y1="77" x2="226" y2="77" class="arrow web" marker-end="url(#ah)"/>
         <line x1="400" y1="77" x2="436" y2="77" class="arrow web" marker-end="url(#ah)"/>
         <line x1="610" y1="77" x2="646" y2="77" class="arrow web" marker-end="url(#ah)"/>
 
-        <!-- row 2: worker -->
-        <text x="110" y="160" class="bold" style="fill:var(--c-worker)">В фоне (worker, ~35 с на книгу 185 КБ)</text>
+        <!-- row 2: worker-ingest -->
+        <text x="110" y="160" class="bold" style="fill:var(--c-worker)">worker-ingest (очередь ingest.parse, 768 МБ): 35–50 с на том</text>
         <rect x="20" y="172" width="130" height="86" rx="10" class="box s-worker"/>
         <text x="85" y="196" text-anchor="middle" class="bold">④ Claim</text>
         <text x="85" y="214" text-anchor="middle" class="muted">UPDATE …</text>
         <text x="85" y="230" text-anchor="middle" class="muted">RETURNING</text>
         <text x="85" y="246" text-anchor="middle" class="muted">(один победитель)</text>
-        <rect x="170" y="172" width="130" height="86" rx="10" class="box s-worker"/>
-        <text x="235" y="196" text-anchor="middle" class="bold">⑤ Парсинг</text>
-        <text x="235" y="214" text-anchor="middle" class="muted">кодировка</text>
-        <text x="235" y="230" text-anchor="middle" class="muted">cp1251/utf-8,</text>
-        <text x="235" y="246" text-anchor="middle" class="muted">главы · 67 мс</text>
-        <rect x="320" y="172" width="130" height="86" rx="10" class="box s-worker"/>
-        <text x="385" y="196" text-anchor="middle" class="bold">⑥ Чанкинг</text>
-        <text x="385" y="214" text-anchor="middle" class="muted">~400 токенов</text>
-        <text x="385" y="230" text-anchor="middle" class="muted">+ заголовок</text>
-        <text x="385" y="246" text-anchor="middle" class="muted">70 мс</text>
-        <rect x="470" y="172" width="130" height="86" rx="10" class="box s-data"/>
-        <text x="535" y="196" text-anchor="middle" class="bold">⑦ Чанки в PG</text>
-        <text x="535" y="214" text-anchor="middle" class="muted">тексты —</text>
-        <text x="535" y="230" text-anchor="middle" class="muted">источник правды</text>
-        <text x="535" y="246" text-anchor="middle" class="muted">123 мс</text>
-        <rect x="620" y="172" width="150" height="86" rx="10" class="box s-ai"/>
-        <text x="695" y="196" text-anchor="middle" class="bold">⑧ Эмбеддинги</text>
-        <text x="695" y="214" text-anchor="middle" class="muted">батчи по 32 → Ollama</text>
-        <text x="695" y="230" text-anchor="middle" class="muted">bge-m3 → 1024 числа</text>
-        <text x="695" y="246" text-anchor="middle" class="muted" style="fill:var(--danger)">15.5 с (95 % времени)</text>
-        <rect x="790" y="172" width="170" height="86" rx="10" class="box s-ai"/>
-        <text x="875" y="196" text-anchor="middle" class="bold">⑨ Qdrant upsert</text>
-        <text x="875" y="214" text-anchor="middle" class="muted">вектор + payload</text>
-        <text x="875" y="230" text-anchor="middle" class="muted">(agent_id, книга, глава)</text>
-        <text x="875" y="246" text-anchor="middle" class="muted">297 мс</text>
-        <line x1="150" y1="215" x2="166" y2="215" class="arrow worker" marker-end="url(#ah)"/>
-        <line x1="300" y1="215" x2="316" y2="215" class="arrow worker" marker-end="url(#ah)"/>
-        <line x1="450" y1="215" x2="466" y2="215" class="arrow worker" marker-end="url(#ah)"/>
-        <line x1="600" y1="215" x2="616" y2="215" class="arrow worker" marker-end="url(#ah)"/>
-        <line x1="770" y1="215" x2="786" y2="215" class="arrow worker" marker-end="url(#ah)"/>
+        <rect x="165" y="172" width="150" height="86" rx="10" class="box s-worker"/>
+        <text x="240" y="196" text-anchor="middle" class="bold">⑤ Парсинг</text>
+        <text x="240" y="214" text-anchor="middle" class="muted">5 парсеров → разделы</text>
+        <text x="240" y="230" text-anchor="middle" class="muted">(том / часть / глава)</text>
+        <text x="240" y="246" text-anchor="middle" class="muted">+ чистка PDF-мусора</text>
+        <rect x="330" y="172" width="150" height="86" rx="10" class="box s-worker"/>
+        <text x="405" y="196" text-anchor="middle" class="bold">⑥ Чанкинг</text>
+        <text x="405" y="214" text-anchor="middle" class="muted">~400 токенов bge-m3</text>
+        <text x="405" y="230" text-anchor="middle" class="muted">не пересекает главу</text>
+        <text x="405" y="246" text-anchor="middle" class="muted">+ заголовок-контекст</text>
+        <rect x="495" y="172" width="130" height="86" rx="10" class="box s-data"/>
+        <text x="560" y="196" text-anchor="middle" class="bold">⑦ Чанки в PG</text>
+        <text x="560" y="214" text-anchor="middle" class="muted">тексты —</text>
+        <text x="560" y="230" text-anchor="middle" class="muted">источник правды</text>
+        <rect x="640" y="172" width="320" height="86" rx="10" class="box s-worker" stroke-width="2"/>
+        <text x="800" y="196" text-anchor="middle" class="bold">⑧ Фан-аут</text>
+        <text x="800" y="214" text-anchor="middle" class="muted">N = ⌈чанков / 32⌉ задач в ingest.embed,</text>
+        <text x="800" y="230" text-anchor="middle" class="muted">batches_total = N в той же транзакции;</text>
+        <text x="800" y="246" text-anchor="middle" class="muted">«Война и мир»: 2873 чанка → 90 батчей</text>
+        <line x1="150" y1="215" x2="161" y2="215" class="arrow worker" marker-end="url(#ah)"/>
+        <line x1="315" y1="215" x2="326" y2="215" class="arrow worker" marker-end="url(#ah)"/>
+        <line x1="480" y1="215" x2="491" y2="215" class="arrow worker" marker-end="url(#ah)"/>
+        <line x1="625" y1="215" x2="636" y2="215" class="arrow worker" marker-end="url(#ah)"/>
         <path d="M525 114 L525 136 L85 136 L85 168" class="arrow worker" marker-end="url(#ah)"/>
-        <!-- loop mark -->
-        <path d="M875 258 C 875 300, 695 300, 695 262" class="arrow worker" marker-end="url(#ah)"/>
-        <text x="785" y="300" text-anchor="middle" class="muted">повторить для каждого батча · прогресс → Redis</text>
-        <text x="20" y="300" class="muted">⑩ В конце: status = done, corpus_version + 1. Документ доступен для поиска.</text>
+
+        <!-- fan-out -->
+        <path d="M800 258 C 800 282, 760 282, 720 282 L 60 282" class="arrow worker"/>
+        <line x1="60" y1="282" x2="60" y2="314" class="arrow worker" marker-end="url(#ah)"/>
+        <line x1="100" y1="282" x2="100" y2="306" class="arrow worker" marker-end="url(#ah)"/>
+        <line x1="140" y1="282" x2="140" y2="298" class="arrow worker" marker-end="url(#ah)"/>
+
+        <!-- row 3: worker-embed -->
+        <text x="200" y="306" class="bold" style="fill:var(--c-worker)">worker-embed (очередь ingest.embed, 2 процесса): каждый батч — отдельная задача</text>
+        <rect x="44" y="302" width="130" height="80" rx="10" class="box s-worker" opacity=".55"/>
+        <rect x="32" y="310" width="130" height="80" rx="10" class="box s-worker" opacity=".8"/>
+        <rect x="20" y="318" width="130" height="80" rx="10" class="box s-worker"/>
+        <text x="85" y="344" text-anchor="middle" class="bold">батч k из N</text>
+        <text x="85" y="362" text-anchor="middle" class="muted">32 чанка из PG</text>
+        <text x="85" y="378" text-anchor="middle" class="muted">по (document, k)</text>
+        <rect x="215" y="318" width="190" height="80" rx="10" class="box s-ai"/>
+        <text x="310" y="344" text-anchor="middle" class="bold">⑨ Эмбеддинги</text>
+        <text x="310" y="362" text-anchor="middle" class="muted">Ollama bge-m3 → 1024 числа</text>
+        <text x="310" y="378" text-anchor="middle" class="muted" style="fill:var(--danger)">~0.13 с на чанк (узкое место)</text>
+        <rect x="430" y="318" width="190" height="80" rx="10" class="box s-ai"/>
+        <text x="525" y="344" text-anchor="middle" class="bold">⑩ Upsert в Qdrant</text>
+        <text x="525" y="362" text-anchor="middle" class="muted">id = uuid5 → без дублей</text>
+        <text x="525" y="378" text-anchor="middle" class="muted">~0.05 с на чанк</text>
+        <rect x="645" y="318" width="315" height="80" rx="10" class="box s-data" stroke-width="2"/>
+        <text x="802" y="344" text-anchor="middle" class="bold">⑪ Счётчик батчей</text>
+        <text x="802" y="362" text-anchor="middle" class="muted">batches_done + 1 … RETURNING (атомарно);</text>
+        <text x="802" y="378" text-anchor="middle" class="muted">кто догнал batches_total — ставит done</text>
+        <line x1="150" y1="358" x2="211" y2="358" class="arrow worker" marker-end="url(#ah)"/>
+        <line x1="405" y1="358" x2="426" y2="358" class="arrow worker" marker-end="url(#ah)"/>
+        <line x1="620" y1="358" x2="641" y2="358" class="arrow worker" marker-end="url(#ah)"/>
+
+        <!-- row 4: safety net -->
+        <rect x="20" y="424" width="460" height="62" rx="10" class="zone"/>
+        <text x="36" y="448" class="bold">⏱ beat → sweeper раз в минуту</text>
+        <text x="36" y="468" class="muted">застрял в queued / processing дольше порога → переотправить</text>
+        <rect x="500" y="424" width="460" height="62" rx="10" class="zone"/>
+        <text x="516" y="448" class="bold">☠ Мёртвые очереди *.dlq</text>
+        <text x="516" y="468" class="muted">неожиданная ошибка → DLQ; make dlq-replay вернёт</text>
       </g>
     </svg>
-    <figcaption>Тайминги — реальный замер из трейса Langfuse («Исповедь», 161 чанк, эмбеддинги на CPU).</figcaption>
+    <figcaption>Замер 2026-09-28: «Война и мир», 4 тома fb2.zip → 2873 чанка за ~17 мин (~2.8 чанка/с), причём посреди прогона
+      был <code>docker kill worker-embed</code> — документ всё равно дошёл до done.</figcaption>
   </figure>
 
   <ol class="steps">
     <li><b>Загрузка.</b> Файл пишется на диск потоком (не читаем 100 МБ в память) и одновременно считается sha256.
+      Разрешены <code>.txt .fb2 .fb2.zip .epub .pdf .docx</code>; архивы (fb2.zip, epub, docx) открываются с защитой от zip-бомбы, XML — от XXE.
       <div class="meta">Laravel-аналог: <code>$request->file()->store()</code>, но без буфера в памяти.</div></li>
     <li><b>Запись в PostgreSQL.</b> Строка <code>documents</code> со статусом <code>queued</code>. Уникальный ключ
       <code>(agent_id, sha256)</code>: тот же файл второй раз не загрузится.</li>
-    <li><b>Публикация задачи — только после COMMIT</b> (<code>uow.on_commit</code>). Иначе воркер мог бы взять задачу раньше,
-      чем строка появится в БД. В сообщении — <b>только id</b>, никакого текста.</li>
-    <li><b>Claim.</b> Воркер атомарно «захватывает» документ: <code>UPDATE documents SET status='processing' WHERE id=? AND status='queued' RETURNING id</code>.
+    <li><b>Публикация задачи — только после COMMIT</b> (<code>uow.on_commit</code>) в очередь <code>ingest.parse</code>.
+      Иначе воркер мог бы взять задачу раньше, чем строка появится в БД. В сообщении — <b>только id</b>.</li>
+    <li><b>Claim.</b> <code>UPDATE documents SET status='processing' WHERE id=? AND status='queued' RETURNING id</code>.
       Если задачу доставили дважды, второй воркер получит пустой результат и тихо выйдет.</li>
-    <li><b>Парсинг txt.</b> Определяем кодировку (русские txt часто в cp1251/koi8-r), чистим невидимые символы,
-      вытаскиваем автора и название из имени файла, режем на главы и абзацы.</li>
-    <li><b>Чанкинг.</b> Жадно упаковываем абзацы в куски ≈400 токенов (максимум 512), считая токены <b>тем же токенизатором, что у модели bge-m3</b>.
-      К каждому чанку добавляется «заголовок контекста»: <i>автор. книга. глава</i> — так вектор знает, откуда кусок.
-      Для индекса «ё» заменяется на «е», в цитатах остаётся исходный текст.</li>
-    <li><b>Чанки → PostgreSQL.</b> Тексты хранятся в PG — это источник правды. Qdrant можно в любой момент пересобрать из PG
-      (например, при смене модели эмбеддингов).</li>
-    <li><b>Эмбеддинги.</b> Батчами по 32 текста в Ollama (<code>POST /api/embed</code>, модель <code>bge-m3</code>). Это самый медленный шаг:
+    <li><b>Парсинг — 5 форматов</b> за общим протоколом <code>Parser → Iterator[Section]</code>: txt (кодировка cp1251/koi8-r,
+      главы по шаблонам), fb2 (разделы <code>&lt;section&gt;</code>, в том числе fb2.zip), epub (свой разбор OPF/NAV/NCX:
+      <code>ebooklib</code> не берём из-за AGPL), pdf (PyMuPDF, outline или заголовки по тексту, удаление колонтитулов
+      и переносов), docx (<code>python-docx</code>, стили Heading).</li>
+    <li><b>Структурный чанкинг.</b> Абзацы жадно пакуются в чанки ≈400 токенов (максимум 512) <b>токенизатором bge-m3</b>;
+      чанк не пересекает границу главы; длинный абзац режется по предложениям (<code>razdel</code>).
+      В текст для эмбеддинга добавляется заголовок «книга / часть / глава» — вектор знает, откуда кусок.</li>
+    <li><b>Чанки → PostgreSQL.</b> Тексты хранятся в PG — это источник правды. Qdrant можно пересобрать из PG
+      (например, при смене модели эмбеддингов) без повторного парсинга.</li>
+    <li><b>Фан-аут.</b> Документ делится на батчи по 32 чанка, на каждый — своя задача в <code>ingest.embed</code>.
+      Два процесса worker-embed берут их параллельно; упавший батч повторяется один, а не вся книга.</li>
+    <li><b>Эмбеддинги.</b> Батч → Ollama (<code>POST /api/embed</code>, <code>bge-m3</code>). Самый медленный шаг:
       модель 567M параметров считает на CPU.</li>
-    <li><b>Upsert в Qdrant.</b> Точка = вектор + payload (<code>agent_id</code>, <code>document_id</code>, книга, глава, текст).
-      id точки детерминирован (<code>uuid5(document_id, версия, номер)</code>), поэтому повтор не создаёт дублей.
-      После каждого батча прогресс пишется в Redis.</li>
-    <li><b>Финал.</b> <code>status=done</code>, тайминги шагов сохраняются в <code>documents.meta.timings</code>, <code>corpus_version</code> агента растёт.</li>
+    <li><b>Upsert в Qdrant.</b> Точка = вектор + payload (<code>agent_id</code>, книга, раздел, текст). id точки детерминирован
+      (<code>uuid5(document_id, версия, номер)</code>): повтор перезаписывает, а не дублирует.</li>
+    <li><b>Финал без координатора.</b> Каждый батч делает атомарный <code>batches_done + 1 … RETURNING</code>; тот, чей инкремент
+      сделал <code>batches_done == batches_total</code>, ставит <code>done</code> и увеличивает <code>corpus_version</code> агента.
+      Отдельный «ждущий» процесс не нужен.</li>
   </ol>
 
   <div class="note warn"><b>Если что-то пошло не так.</b> Ошибки делятся на три класса:
-    <b>Transient</b> (Ollama недоступна, таймаут) — Celery повторит с растущей паузой до 6 раз;
-    <b>Permanent</b> (пустой или битый файл) — сразу <code>failed</code> с понятным текстом, без повторов;
-    <b>неожиданные</b> — сообщение уходит в «мёртвую очередь» (DLQ) RabbitMQ, откуда его можно переотправить вручную.</div>
+    <b>Transient</b> (Ollama недоступна, таймаут) — Celery повторит с растущей паузой и jitter;
+    <b>Permanent</b> (пустой, битый или пропавший файл) — сразу <code>failed</code> с понятным кодом, без повторов;
+    <b>неожиданные</b> — сообщение уходит в «мёртвую очередь» (<code>*.dlq</code>), <code>make dlq-replay QUEUE=ingest.embed</code> вернёт его.
+    Если воркер умер посреди задачи, <code>acks_late</code> вернёт её в очередь, а sweeper подхватит документ, застрявший дольше порога.</div>
 </section>
 
 <!-- ============================ 5. QUERY ============================ -->
@@ -607,6 +677,229 @@ svg .bold { font-weight: 700; }
   </div>
 </section>
 
+<!-- ============================ 5b. EVAL ============================ -->
+<section id="eval">
+  <h2>Workflow 3. Как мы меряем качество (eval) <span class="badge b-ok">работает</span></h2>
+  <p class="lead">Любое изменение поиска, чанкинга или промпта подтверждается цифрой, а не ощущением.
+    Для этого есть golden-датасет, runner, который гоняет его через <b>тот же конвейер</b>, что отвечает
+    пользователю, и LLM-судья для метрик, которые нельзя посчитать формулой.</p>
+
+  <figure>
+    <svg viewBox="0 0 980 330" role="img" aria-label="Схема eval-прогона">
+      <g font-size="12">
+        <rect x="20" y="30" width="170" height="120" rx="10" class="box s-data" stroke-width="2"/>
+        <text x="105" y="54" text-anchor="middle" class="bold">① Golden JSONL</text>
+        <text x="105" y="74" text-anchor="middle" class="muted">59 вопросов:</text>
+        <text x="105" y="92" text-anchor="middle">factual 21 · interpretive 13</text>
+        <text x="105" y="110" text-anchor="middle">out_of_corpus 13</text>
+        <text x="105" y="128" text-anchor="middle">multi_hop 8 · injection 4</text>
+
+        <rect x="230" y="30" width="200" height="120" rx="10" class="box s-web" stroke-width="2"/>
+        <text x="330" y="54" text-anchor="middle" class="bold">② QueryService.evaluate</text>
+        <text x="330" y="74" text-anchor="middle" class="muted">тот же конвейер, что у web:</text>
+        <text x="330" y="92" text-anchor="middle" class="muted">Ollama → Qdrant → DeepSeek</text>
+        <text x="330" y="110" text-anchor="middle" class="muted">без чата; search_k = 20</text>
+        <text x="330" y="128" text-anchor="middle" class="muted">(в промпт — top_k = 6)</text>
+
+        <rect x="470" y="30" width="220" height="120" rx="10" class="box s-ai" stroke-width="2"/>
+        <text x="580" y="54" text-anchor="middle" class="bold">③ Метрики без LLM</text>
+        <text x="580" y="74" text-anchor="middle" class="muted">hit@k, recall@k, MRR@10</text>
+        <text x="580" y="92" text-anchor="middle" class="muted">(совпадение книга + глава)</text>
+        <text x="580" y="110" text-anchor="middle" class="muted">отказы, валидность [n],</text>
+        <text x="580" y="128" text-anchor="middle" class="muted">инъекции, empty_answer</text>
+
+        <rect x="730" y="30" width="230" height="120" rx="10" class="box s-ext" stroke-width="2"/>
+        <text x="845" y="54" text-anchor="middle" class="bold">④ LLM-судья judge_v1</text>
+        <text x="845" y="74" text-anchor="middle" class="muted">3 вызова DeepSeek, JSON-режим:</text>
+        <text x="845" y="92" text-anchor="middle">faithfulness + citation support</text>
+        <text x="845" y="110" text-anchor="middle">context precision / recall</text>
+        <text x="845" y="128" text-anchor="middle">relevancy + key facts</text>
+
+        <line x1="190" y1="90" x2="226" y2="90" class="arrow" marker-end="url(#ah)"/>
+        <line x1="430" y1="90" x2="466" y2="90" class="arrow" marker-end="url(#ah)"/>
+        <line x1="690" y1="90" x2="726" y2="90" class="arrow" marker-end="url(#ah)"/>
+        <path d="M845 150 L845 180 L105 180 L105 206" class="arrow" marker-end="url(#ah)"/>
+        <text x="480" y="174" text-anchor="middle" class="muted">параллельно по 2 вопроса; упавший вопрос не валит прогон</text>
+
+        <rect x="20" y="210" width="220" height="100" rx="10" class="box s-data" stroke-width="2"/>
+        <text x="130" y="234" text-anchor="middle" class="bold">⑤ PostgreSQL</text>
+        <text x="130" y="254" text-anchor="middle" class="muted">eval_runs: конфиг, git, судья</text>
+        <text x="130" y="272" text-anchor="middle" class="muted">eval_items: ответ, найденное,</text>
+        <text x="130" y="290" text-anchor="middle" class="muted">scores, вердикты, trace_id</text>
+        <line x1="240" y1="260" x2="276" y2="260" class="arrow" marker-end="url(#ah)"/>
+        <rect x="280" y="210" width="220" height="100" rx="10" class="box" stroke-width="2"/>
+        <text x="390" y="234" text-anchor="middle" class="bold">📄 Markdown-отчёт</text>
+        <text x="390" y="254" text-anchor="middle" class="muted">сводка, по категориям,</text>
+        <text x="390" y="272" text-anchor="middle" class="muted">10 худших со ссылкой на трейс</text>
+        <text x="390" y="290" text-anchor="middle" class="muted">reports/eval/*.md</text>
+        <rect x="520" y="210" width="210" height="100" rx="10" class="box s-obs" stroke-width="2"/>
+        <text x="625" y="234" text-anchor="middle" class="bold">🔭 Langfuse Datasets</text>
+        <text x="625" y="254" text-anchor="middle" class="muted">прогон = dataset run,</text>
+        <text x="625" y="272" text-anchor="middle" class="muted">scores на трейсе вопроса:</text>
+        <text x="625" y="290" text-anchor="middle" class="muted">видно, почему ответ плохой</text>
+        <rect x="750" y="210" width="210" height="100" rx="10" class="box s-web" stroke-width="2"/>
+        <text x="855" y="234" text-anchor="middle" class="bold">🎯 Страница «Качество»</text>
+        <text x="855" y="254" text-anchor="middle" class="muted">/eval в UI: прогоны,</text>
+        <text x="855" y="272" text-anchor="middle" class="muted">графики, diff двух прогонов</text>
+        <text x="855" y="290" text-anchor="middle" class="muted">с 95 % CI, худшие примеры</text>
+        <line x1="500" y1="260" x2="516" y2="260" class="arrow" marker-end="url(#ah)"/>
+        <line x1="730" y1="260" x2="746" y2="260" class="arrow" marker-end="url(#ah)"/>
+      </g>
+    </svg>
+    <figcaption><code>make eval AGENT=tolstoi CONFIG=dense</code> → одноразовый контейнер <code>eval</code>. Прогон 59 вопросов — ~25 мин,
+      ответы ~$0.02, судья ~$0.2.</figcaption>
+  </figure>
+
+  <h3>Baseline: где мы сейчас</h3>
+  <figure>
+    <svg viewBox="0 0 980 456" role="img" aria-label="Baseline dense: метрики">
+      <g font-size="12.5">
+        <text x="20" y="22" class="bold">Baseline <tspan class="mono">dense</tspan> · прогон 01a0ed1e · 59 вопросов · 2026-09-29</text>
+        <line x1="200" y1="36" x2="200" y2="408" class="life"/>
+        <text x="200" y="424" text-anchor="middle" class="muted" font-size="11">0</text>
+        <line x1="355" y1="36" x2="355" y2="408" class="life"/>
+        <text x="355" y="424" text-anchor="middle" class="muted" font-size="11">0.25</text>
+        <line x1="510" y1="36" x2="510" y2="408" class="life"/>
+        <text x="510" y="424" text-anchor="middle" class="muted" font-size="11">0.5</text>
+        <line x1="665" y1="36" x2="665" y2="408" class="life"/>
+        <text x="665" y="424" text-anchor="middle" class="muted" font-size="11">0.75</text>
+        <line x1="820" y1="36" x2="820" y2="408" class="life"/>
+        <text x="820" y="424" text-anchor="middle" class="muted" font-size="11">1</text>
+        <text x="190" y="57" text-anchor="end">hit@5</text>
+        <rect x="200" y="44" width="620" height="18" rx="4" fill="var(--soft)"/>
+        <rect x="200" y="44" width="487" height="18" rx="4" class="k-ai"/>
+        <text x="695" y="57" class="bold">0.786</text>
+        <text x="190" y="85" text-anchor="end">hit@8</text>
+        <rect x="200" y="72" width="620" height="18" rx="4" fill="var(--soft)"/>
+        <rect x="200" y="72" width="516" height="18" rx="4" class="k-ai"/>
+        <text x="724" y="85" class="bold">0.833</text>
+        <text x="190" y="113" text-anchor="end">hit@20</text>
+        <rect x="200" y="100" width="620" height="18" rx="4" fill="var(--soft)"/>
+        <rect x="200" y="100" width="590" height="18" rx="4" class="k-ai"/>
+        <text x="798" y="113" class="bold">0.952</text>
+        <text x="190" y="141" text-anchor="end">recall@8</text>
+        <rect x="200" y="128" width="620" height="18" rx="4" fill="var(--soft)"/>
+        <rect x="200" y="128" width="487" height="18" rx="4" class="k-ai"/>
+        <text x="695" y="141" class="bold">0.786</text>
+        <text x="190" y="169" text-anchor="end">MRR@10</text>
+        <rect x="200" y="156" width="620" height="18" rx="4" fill="var(--soft)"/>
+        <rect x="200" y="156" width="355" height="18" rx="4" class="k-ai"/>
+        <text x="563" y="169" class="bold">0.572</text>
+        <text x="190" y="197" text-anchor="end">context precision</text>
+        <rect x="200" y="184" width="620" height="18" rx="4" fill="var(--soft)"/>
+        <rect x="200" y="184" width="399" height="18" rx="4" class="k-ext"/>
+        <text x="607" y="197" class="bold">0.643</text>
+        <text x="190" y="225" text-anchor="end">context recall</text>
+        <rect x="200" y="212" width="620" height="18" rx="4" fill="var(--soft)"/>
+        <rect x="200" y="212" width="423" height="18" rx="4" class="k-ext"/>
+        <text x="631" y="225" class="bold">0.683</text>
+        <text x="190" y="253" text-anchor="end">faithfulness</text>
+        <rect x="200" y="240" width="620" height="18" rx="4" fill="var(--soft)"/>
+        <rect x="200" y="240" width="589" height="18" rx="4" class="k-ext"/>
+        <text x="797" y="253" class="bold">0.950</text>
+        <text x="190" y="281" text-anchor="end">answer relevancy</text>
+        <rect x="200" y="268" width="620" height="18" rx="4" fill="var(--soft)"/>
+        <rect x="200" y="268" width="399" height="18" rx="4" class="k-ext"/>
+        <text x="607" y="281" class="bold">0.643</text>
+        <text x="190" y="309" text-anchor="end">key facts coverage</text>
+        <rect x="200" y="296" width="620" height="18" rx="4" fill="var(--soft)"/>
+        <rect x="200" y="296" width="340" height="18" rx="4" class="k-ext"/>
+        <text x="548" y="309" class="bold">0.548</text>
+        <text x="190" y="337" text-anchor="end">citation support</text>
+        <rect x="200" y="324" width="620" height="18" rx="4" fill="var(--soft)"/>
+        <rect x="200" y="324" width="587" height="18" rx="4" class="k-ext"/>
+        <text x="795" y="337" class="bold">0.947</text>
+        <text x="190" y="365" text-anchor="end">refusal precision</text>
+        <rect x="200" y="352" width="620" height="18" rx="4" fill="var(--soft)"/>
+        <rect x="200" y="352" width="578" height="18" rx="4" class="k-worker"/>
+        <text x="786" y="365" class="bold">0.933</text>
+        <text x="190" y="393" text-anchor="end">refusal recall</text>
+        <rect x="200" y="380" width="620" height="18" rx="4" fill="var(--soft)"/>
+        <rect x="200" y="380" width="511" height="18" rx="4" class="k-worker"/>
+        <text x="719" y="393" class="bold">0.824</text>
+        <rect x="200" y="436" width="12" height="12" rx="3" class="k-ai"/><text x="218" y="446" font-size="11.5">retrieval (без LLM)</text>
+        <rect x="370" y="436" width="12" height="12" rx="3" class="k-ext"/><text x="388" y="446" font-size="11.5">LLM-судья judge_v1</text>
+        <rect x="540" y="436" width="12" height="12" rx="3" class="k-worker"/><text x="558" y="446" font-size="11.5">отказы (out_of_corpus)</text>
+      </g>
+    </svg>
+    <figcaption>Среднее по вопросам, где метрика определена (retrieval — по 42 вопросам с ожидаемыми источниками).</figcaption>
+  </figure>
+  <figure>
+    <svg viewBox="0 0 980 308" role="img" aria-label="Метрики по категориям вопросов">
+      <g font-size="12.5">
+        <text x="20" y="22" class="bold">По категориям: где ядро проседает</text>
+        <text x="160" y="78" text-anchor="end" class="bold">factual (21)</text>
+        <rect x="170" y="44" width="389" height="16" rx="4" class="k-ai"/>
+        <text x="567" y="56" class="bold">0.81</text>
+        <rect x="170" y="66" width="389" height="16" rx="4" class="k-web"/>
+        <text x="567" y="78" class="bold">0.81</text>
+        <rect x="170" y="88" width="341" height="16" rx="4" class="k-ext"/>
+        <text x="519" y="100" class="bold">0.71</text>
+        <text x="160" y="156" text-anchor="end" class="bold">interpretive (13)</text>
+        <rect x="170" y="122" width="442" height="16" rx="4" class="k-ai"/>
+        <text x="620" y="134" class="bold">0.92</text>
+        <rect x="170" y="144" width="442" height="16" rx="4" class="k-web"/>
+        <text x="620" y="156" class="bold">0.92</text>
+        <rect x="170" y="166" width="370" height="16" rx="4" class="k-ext"/>
+        <text x="548" y="178" class="bold">0.77</text>
+        <text x="160" y="234" text-anchor="end" class="bold">multi_hop (8)</text>
+        <rect x="170" y="200" width="360" height="16" rx="4" class="k-ai"/>
+        <text x="538" y="212" class="bold">0.75</text>
+        <rect x="170" y="222" width="240" height="16" rx="4" class="k-web"/>
+        <text x="418" y="234" class="bold" style="fill:var(--danger)">0.50</text>
+        <rect x="170" y="244" width="120" height="16" rx="4" class="k-ext"/>
+        <text x="298" y="256" class="bold" style="fill:var(--danger)">0.25</text>
+        <rect x="720" y="70" width="245" height="150" rx="10" class="zone"/>
+        <text x="734" y="96" class="bold" style="fill:var(--danger)">multi_hop — слабое место</text>
+        <text x="734" y="120" font-size="12" class="muted">ответ собирается из 2–3 глав,</text>
+        <text x="734" y="138" font-size="12" class="muted">dense находит одну: recall@8 0.50,</text>
+        <text x="734" y="156" font-size="12" class="muted">answer relevancy 0.25.</text>
+        <text x="734" y="184" font-size="12">Итерация 5: BM25 + reranker</text>
+        <text x="734" y="202" font-size="12">+ small-to-big контекст.</text>
+        <rect x="170" y="290" width="12" height="12" rx="3" class="k-ai"/><text x="188" y="300" font-size="11.5">hit@8</text>
+        <rect x="330" y="290" width="12" height="12" rx="3" class="k-web"/><text x="348" y="300" font-size="11.5">recall@8</text>
+        <rect x="490" y="290" width="12" height="12" rx="3" class="k-ext"/><text x="508" y="300" font-size="11.5">answer relevancy</text>
+      </g>
+    </svg>
+  </figure>
+
+  <div class="grid2">
+    <div class="card"><h4>📏 Как понять, что улучшение — не шум</h4>
+      <p>59 вопросов — мало: разница в 3–5 пунктов может быть случайностью. <b>Парный bootstrap</b>: 10 000 раз
+        выбираем вопросы с возвращением и считаем разницу метрики B − A <b>на одних и тех же вопросах</b>.
+        2.5-й и 97.5-й перцентили дают 95 % доверительный интервал. «Лучше» — только если весь интервал выше нуля.</p>
+      <p>Реальный <code>make eval-diff</code> двух прогонов: <code>has_citation</code> +0.103 [+0.026; +0.205] — <b>лучше</b>;
+        faithfulness +0.024 [−0.017; +0.071] — <b>шум</b>, хотя «на глаз» выросла.</p></div>
+    <div class="card"><h4>🧪 Что в датасете и зачем</h4>
+      <p><b>factual</b> — конкретный факт из главы; <b>interpretive</b> — «как меняется отношение…»;
+        <b>multi_hop</b> — ответ из нескольких глав или книг; <b>out_of_corpus</b> (22 %) — ответа в книгах нет,
+        правильно — отказ (это сырьё для калибровки порога в итерации 5); <b>injection</b> — «игнорируй инструкции…».</p>
+      <p>У каждого вопроса — эталонный ответ, <code>key_facts</code> и ожидаемые источники (книга + глава).</p></div>
+  </div>
+
+  <h3>Истории, которые случились по дороге</h3>
+  <div class="grid2">
+    <div class="card"><h4>🧠 Судья думал, пока не кончились токены</h4>
+      <p>deepseek-flash — reasoning-модель без режима «не думать». На разборе длинного ответа она тратила до
+        <b>14 300 токенов</b> на рассуждения; с лимитом 2 000 судья возвращал пустой JSON почти на каждом вопросе,
+        и faithfulness молча пропадала из среднего. Теперь лимит 24 000 (платим за фактические токены),
+        при <code>finish_reason=length</code> — один повтор, а в результат пишется явная ошибка <code>truncated</code>.</p></div>
+    <div class="card"><h4>🕳 9 % пустых ответов в проде</h4>
+      <p>Тот же эффект у самого ответа: модель расходует весь <code>max_output_tokens</code> (1200) на «думанье» и не пишет
+        ни слова. Eval это поймал: метрика <code>empty_answer</code> = 0.091, и для вопроса из корпуса пустой ответ
+        считается провалом, а не пропуском. Исправление в конвейере — итерация 5, eval покажет эффект.</p></div>
+    <div class="card"><h4>📦 Почему свой судья, а не RAGAS</h4>
+      <p>RAGAS тянет LangChain (в проекте запрещён) и десятки зависимостей, промпты у него английские и меняются между
+        версиями — метрика «плывёт» от обновления пакета. Свой судья — ~200 строк с русскими промптами, версия
+        <code>judge_v1</code> пишется в прогон, <code>eval-diff</code> предупреждает, если судьи разные (ADR-10).</p></div>
+    <div class="card"><h4>🔢 Prometheus и PID 1</h4>
+      <p>Метрики нескольких процессов пишутся в файлы общего volume, по умолчанию с именем по PID. Но в каждом
+        контейнере главный процесс — PID 1, и web, воркеры и beat писали в один <code>counter_1.db</code>.
+        Имена теперь <code>hostname-pid</code>. А eval-контейнер в общий каталог не пишет: пустая переменная не выключает
+        режим, её пришлось снимать <code>env -u PROMETHEUS_MULTIPROC_DIR</code>.</p></div>
+  </div>
+</section>
+
 <!-- ============================ 6. PROMPT ============================ -->
 <section id="prompt">
   <h2>Промпт и защита от выдумок</h2>
@@ -660,7 +953,7 @@ svg .bold { font-weight: 700; }
     <dt>Почему</dt><dd>Ловят ошибки до запуска; import-linter не даёт роутам ходить в БД в обход сервисов.</dd></dl></div>
   <div class="tech"><div class="name">pytest<small>тесты</small></div><dl>
     <dt>Что это</dt><dd>Фреймворк тестов (как PHPUnit/Pest). <code>pytest-asyncio</code> — для async-тестов, <code>respx</code> — мок HTTP.</dd>
-    <dt>Как у нас</dt><dd>unit (без сети и БД) + integration на реальных PG/Qdrant/Redis в отдельном <code>compose.test.yaml</code>. Сейчас 76 + 12 тестов.</dd>
+    <dt>Как у нас</dt><dd>unit (без сети и БД) + integration на реальных PG/Qdrant/Redis в отдельном <code>compose.test.yaml</code>. Сейчас 202 unit + 77 integration, включая тест изоляции агентов по всем эндпоинтам и мини-eval на фикстурном корпусе.</dd>
     <dt>Почему</dt><dd>Стандарт де-факто; фикстуры удобнее, чем setUp/tearDown.</dd></dl></div>
 
   <div class="group-title"><span class="dot" style="background:var(--c-web)"></span><b>Веб и интерфейс</b></div>
@@ -674,11 +967,11 @@ svg .bold { font-weight: 700; }
     <dt>Почему</dt><dd>Стандарт для FastAPI, держит тысячи открытых SSE-соединений на одном event loop.</dd></dl></div>
   <div class="tech"><div class="name">Jinja2 + HTMX + Bootstrap 5<small>интерфейс без SPA</small></div><dl>
     <dt>Что это</dt><dd>Jinja2 — шаблоны (как Blade). HTMX — атрибуты <code>hx-get/hx-post</code> для AJAX с HTML-ответом. <code>htmx-ext-sse</code> — подписка на SSE-события. Bootstrap — стили.</dd>
-    <dt>Как у нас</dt><dd>Сервер рендерит HTML; polling статусов каждые 2 с с остановкой по HTTP 286; токены ответа дописываются в пузырь через SSE.</dd>
+    <dt>Как у нас</dt><dd>Сервер рендерит HTML; polling статусов каждые 2 с с остановкой по HTTP 286; токены ответа дописываются в пузырь через SSE. Рядом — JSON API <code>/api/v1</code> для программ (Bearer-ключ).</dd>
     <dt>Почему</dt><dd>Без node-сборки и SPA — вся логика на сервере, меньше кода. Для такого UI React был бы избыточен.</dd></dl></div>
   <div class="tech"><div class="name">Chart.js<small>графики</small></div><dl>
     <dt>Что это</dt><dd>JS-библиотека графиков с CDN.</dd>
-    <dt>Как у нас</dt><dd>График «вопросы и стоимость» на странице «Аналитика».</dd>
+    <dt>Как у нас</dt><dd>График «вопросы и стоимость» на странице «Аналитика», метрики прогонов на странице «Качество».</dd>
     <dt>Почему</dt><dd>Один script-тег, без сборки.</dd></dl></div>
 
   <div class="group-title"><span class="dot" style="background:var(--c-data)"></span><b>Данные</b></div>
@@ -692,7 +985,7 @@ svg .bold { font-weight: 700; }
     <dt>Почему</dt><dd>Стандарт в Python; async-режим не блокирует event loop, пока идёт запрос к БД.</dd></dl></div>
   <div class="tech"><div class="name">Alembic<small>миграции</small></div><dl>
     <dt>Что это</dt><dd>Миграции схемы (как <code>php artisan migrate</code>).</dd>
-    <dt>Как у нас</dt><dd>Сервис <code>migrate</code> в Compose применяет их при старте (<code>0001_initial</code>, <code>0002_message_feedback</code>).</dd>
+    <dt>Как у нас</dt><dd>Сервис <code>migrate</code> в Compose применяет их при старте: <code>0001_initial</code> … <code>0005_eval</code> (отзывы, API-ключи, ingest-джобы и батчи, eval-прогоны).</dd>
     <dt>Почему</dt><dd>Стандартная пара к SQLAlchemy.</dd></dl></div>
   <div class="tech"><div class="name">Pydantic v2 + pydantic-settings<small>валидация, конфиг</small></div><dl>
     <dt>Что это</dt><dd>Модели данных с валидацией по аннотациям типов (как FormRequest + DTO). pydantic-settings читает <code>.env</code>.</dd>
@@ -702,7 +995,7 @@ svg .bold { font-weight: 700; }
   <div class="group-title"><span class="dot" style="background:var(--c-worker)"></span><b>Фоновые задачи</b></div>
   <div class="tech"><div class="name">Celery 5<small>очередь задач</small></div><dl>
     <dt>Что это</dt><dd>Фреймворк фоновых задач (как Laravel Queues + Horizon).</dd>
-    <dt>Как у нас</dt><dd>Задача <code>ingest_document</code>. Код сервисов async, а Celery sync — поэтому у каждого процесса-воркера <b>один постоянный event loop</b>, в котором выполняются корутины. Настройки: <code>acks_late</code> (подтверждение после выполнения), <code>prefetch=1</code>, ретраи с backoff.</dd>
+    <dt>Как у нас</dt><dd>Задачи <code>parse</code> (worker-ingest), <code>embed_batch</code> (worker-embed, по задаче на батч) и <code>sweep</code> (раз в минуту от beat). Код сервисов async, а Celery sync — поэтому у каждого процесса-воркера <b>один постоянный event loop</b>, в котором выполняются корутины. Настройки: <code>acks_late</code>, <code>prefetch=1</code>, ретраи с backoff и jitter, <code>worker_proc_alive_timeout=60</code>.</dd>
     <dt>Почему</dt><dd>Зрелые ретраи, мёртвые очереди, мониторинг (Flower). Альтернативы arq/taskiq нативно async, но менее зрелые.</dd></dl></div>
   <div class="tech"><div class="name">RabbitMQ<small>брокер сообщений</small></div><dl>
     <dt>Что это</dt><dd>Сервер очередей по протоколу AMQP.</dd>
@@ -710,7 +1003,7 @@ svg .bold { font-weight: 700; }
     <dt>Почему</dt><dd>Надёжнее Redis как брокера: подтверждения, dead-letter exchange, сообщения не теряются при рестарте.</dd></dl></div>
   <div class="tech"><div class="name">Redis<small>быстрое хранилище в памяти</small></div><dl>
     <dt>Что это</dt><dd>Key-value хранилище в оперативной памяти.</dd>
-    <dt>Как у нас</dt><dd>Прогресс индексации (часто пишет воркер, часто читает браузер), кэш страницы «Аналитика», pub/sub для живой схемы на <code>/system</code>, отметка «лимит Langfuse исчерпан до…». <span class="badge b-plan">в плане</span> — сессии и rate limit.</dd>
+    <dt>Как у нас</dt><dd>Серверные сессии (<code>sess:{sha256(id)}</code>, 7 дней sliding), rate limit (sliding window на ZSET + Lua: 20 вопросов/мин, 30 загрузок/ч, 5 логинов/мин с IP), прогресс индексации, кэш «Аналитики», pub/sub для живой схемы на <code>/system</code>, отметка «лимит Langfuse исчерпан до…».</dd>
     <dt>Почему</dt><dd>Не нагружать PG частыми мелкими записями; данные тут можно потерять без вреда.</dd></dl></div>
 
   <div class="group-title"><span class="dot" style="background:var(--c-ai)"></span><b>RAG: поиск по смыслу</b></div>
@@ -726,6 +1019,10 @@ svg .bold { font-weight: 700; }
     <dt>Что это</dt><dd>Библиотека Hugging Face (Rust) для токенизации.</dd>
     <dt>Как у нас</dt><dd>Чанкер считает токены <b>токенизатором bge-m3</b>, чтобы чанк гарантированно влез в окно модели (512).</dd>
     <dt>Почему</dt><dd>Считать «словами» или символами неточно, а обрезанный моделью текст теряет смысл.</dd></dl></div>
+  <div class="tech"><div class="name">PyMuPDF · python-docx · lxml · razdel<small>парсинг форматов</small></div><dl>
+    <dt>Что это</dt><dd>PyMuPDF — быстрый разбор PDF (текст, outline); python-docx — Word; lxml + selectolax — XML/XHTML для fb2 и epub; razdel (Natasha) — разбиение русского текста на предложения.</dd>
+    <dt>Как у нас</dt><dd>Пять парсеров за протоколом <code>Parser</code> отдают поток <code>Section</code> (путь «том / часть / глава» + абзацы). EPUB читаем сами (OPF/NAV/NCX), без <code>ebooklib</code>. XML открывается с защитой от XXE, архивы — от zip-бомб.</dd>
+    <dt>Почему</dt><dd>Лицензии проверяются до добавления: <code>ebooklib</code> (AGPL) отклонён. PyMuPDF тоже AGPL — осознанное исключение для открытого pet-проекта, записанное в SPEC; запасной вариант — <code>pypdfium2</code>.</dd></dl></div>
   <div class="tech"><div class="name">charset-normalizer<small>кодировки</small></div><dl>
     <dt>Что это</dt><dd>Определение кодировки текста по байтам.</dd>
     <dt>Как у нас</dt><dd>Старые русские txt часто в cp1251/koi8-r; проверяем, что после декодирования получилась кириллица.</dd>
@@ -744,6 +1041,10 @@ svg .bold { font-weight: 700; }
     <dt>Что это</dt><dd>Коммерческая LLM с OpenAI-совместимым API, reasoning-модель.</dd>
     <dt>Как у нас</dt><dd>Свой адаптер <code>OpenAICompatProvider</code> на <code>httpx</code> (без SDK): стрим SSE от DeepSeek, <code>reasoning_effort</code>, учёт токенов, в том числе кэшированных. Temperature 0.3, до 1200 токенов.</dd>
     <dt>Почему</dt><dd>Дёшево (~$0.001 за ответ), хорошо по-русски, prefix-кэш. Свой адаптер — полный контроль таймаутов и разбора стрима. <span class="badge b-plan">в плане</span>: fallback на Claude/OpenAI через <code>LLMRouter</code>.</dd></dl></div>
+  <div class="tech"><div class="name">LLM-судья judge_v1<small>оценка качества</small></div><dl>
+    <dt>Что это</dt><dd>Та же DeepSeek, но в роли проверяющего: получает вопрос, эталон, найденные фрагменты и ответ и возвращает оценку в JSON.</dd>
+    <dt>Как у нас</dt><dd>Три вызова на вопрос: faithfulness + citation support, context precision / recall, answer relevancy + key facts. Промпты в файлах, версия пишется в прогон.</dd>
+    <dt>Почему</dt><dd>Faithfulness формулой не посчитать. RAGAS не взяли: тянет LangChain и меняет промпты между версиями (ADR-10). Смещение судьи (он оценивает свою же модель) проверим сверкой с Claude в итерации 5.</dd></dl></div>
   <div class="tech"><div class="name">httpx<small>HTTP-клиент</small></div><dl>
     <dt>Что это</dt><dd>Async HTTP-клиент (как Guzzle).</dd>
     <dt>Как у нас</dt><dd>DeepSeek, Ollama, API Langfuse. Раздельные таймауты на соединение и на чтение.</dd>
@@ -752,7 +1053,7 @@ svg .bold { font-weight: 700; }
   <div class="group-title"><span class="dot" style="background:var(--c-obs)"></span><b>Наблюдаемость</b></div>
   <div class="tech"><div class="name">Langfuse Cloud<small>трейсы LLM</small></div><dl>
     <dt>Что это</dt><dd>Платформа наблюдаемости для LLM-приложений: трейсы, стоимость, оценки, датасеты. SDK построен на OpenTelemetry.</dd>
-    <dt>Как у нас</dt><dd>Трейс на каждый вопрос и каждую индексацию; 👍/👎 → score; наша стоимость → <code>cost_details</code>. Подробно — в разделе <a href="#metrics">«Метрики»</a>.</dd>
+    <dt>Как у нас</dt><dd>Трейс на каждый вопрос и каждую индексацию; 👍/👎 → score; наша стоимость → <code>cost_details</code>; eval-прогон → Langfuse Datasets, метрики вопроса — score-ы на его трейсе. Подробно — в разделе <a href="#metrics">«Метрики»</a>.</dd>
     <dt>Почему</dt><dd>Cloud, потому что self-hosted (ClickHouse + MinIO + …) требует ~3.5 ГБ RAM, а на VM их нет.</dd></dl></div>
   <div class="tech"><div class="name">structlog<small>логи</small></div><dl>
     <dt>Что это</dt><dd>Структурированные логи: JSON с ключами вместо строк (как Monolog с JSON-форматтером).</dd>
@@ -760,59 +1061,66 @@ svg .bold { font-weight: 700; }
     <dt>Почему</dt><dd>JSON-логи легко фильтровать и отправлять в любую систему сбора.</dd></dl></div>
   <div class="tech"><div class="name">Prometheus-метрики<small>/metrics</small></div><dl>
     <dt>Что это</dt><dd>Стандартный формат счётчиков и гистограмм для мониторинга.</dd>
-    <dt>Как у нас</dt><dd><span class="badge b-plan">в плане (итерация 4)</span>: HTTP, стадии RAG, токены, стоимость, глубина очередей.</dd>
+    <dt>Как у нас</dt><dd><span class="badge b-ok">работает</span> <code>prometheus_client</code> в multiprocess-режиме: web, воркеры и beat пишут в общий volume, <code>/metrics</code> на web суммирует. HTTP, стадии RAG, токены, стоимость, ingest, глубина очередей RabbitMQ.</dd>
     <dt>Почему</dt><dd>Индустриальный стандарт для алертов (Grafana).</dd></dl></div>
 
   <div class="group-title"><span class="dot" style="background:var(--muted)"></span><b>Инфраструктура</b></div>
   <div class="tech"><div class="name">Docker + Compose<small>запуск всего стенда</small></div><dl>
     <dt>Что это</dt><dd>Контейнеры и описание стенда одним файлом.</dd>
-    <dt>Как у нас</dt><dd>Один образ приложения (multi-stage, uv) для web, worker и migrate. Лимиты памяти и CPU на каждый сервис. Профили: <code>debug</code> (Flower, pgweb, RedisInsight), <code>local-ollama</code>.</dd>
+    <dt>Как у нас</dt><dd>Один образ приложения (multi-stage, uv) для web, worker-ingest, worker-embed, beat, migrate и eval. Лимиты памяти и CPU на каждый сервис. Профили: <code>debug</code> (Flower, pgweb, RedisInsight), <code>tools</code> (одноразовый eval), <code>local-ollama</code>.</dd>
     <dt>Почему</dt><dd><code>make up</code> поднимает всё одинаково на любой машине; лимиты не дают одному сервису съесть 8 ГБ VM.</dd></dl></div>
 </section>
 
 <!-- ============================ 8. METRICS ============================ -->
 <section id="metrics">
   <h2>Метрики и наблюдаемость: что меряем и где смотреть</h2>
-  <p class="lead">Четыре уровня: от «что случилось с этим запросом» до «сколько мы тратим в день».</p>
+  <p class="lead">Шесть уровней: от «что случилось с этим запросом» до «стало ли качество лучше после изменения».</p>
 
   <figure>
-    <svg viewBox="0 0 980 250" role="img" aria-label="Уровни наблюдаемости">
+    <svg viewBox="0 0 980 440" role="img" aria-label="Уровни наблюдаемости">
       <g font-size="12">
-        <rect x="10" y="20" width="230" height="210" rx="12" class="box s-obs" stroke-width="2"/>
-        <text x="125" y="46" text-anchor="middle" class="bold">📝 Логи (structlog)</text>
-        <text x="125" y="72" text-anchor="middle" class="muted">JSON в stdout контейнера</text>
-        <text x="125" y="96" text-anchor="middle">события: ingest.done,</text>
-        <text x="125" y="114" text-anchor="middle">query.done, query.failed</text>
-        <text x="125" y="146" text-anchor="middle" class="muted">вопрос: «что сломалось</text>
-        <text x="125" y="164" text-anchor="middle" class="muted">и когда?»</text>
-        <text x="125" y="208" text-anchor="middle" class="bold" style="fill:var(--c-obs)">make logs s=web</text>
-
-        <rect x="255" y="20" width="230" height="210" rx="12" class="box s-obs" stroke-width="2"/>
-        <text x="370" y="46" text-anchor="middle" class="bold">🔭 Трейсы (Langfuse)</text>
-        <text x="370" y="72" text-anchor="middle" class="muted">дерево шагов каждого запроса</text>
-        <text x="370" y="96" text-anchor="middle">промпт, ответ, чанки, score,</text>
-        <text x="370" y="114" text-anchor="middle">токены, TTFT, стоимость</text>
-        <text x="370" y="146" text-anchor="middle" class="muted">вопрос: «почему ответ</text>
-        <text x="370" y="164" text-anchor="middle" class="muted">плохой / медленный?»</text>
-        <text x="370" y="208" text-anchor="middle" class="bold" style="fill:var(--c-obs)">cloud.langfuse.com</text>
-
-        <rect x="500" y="20" width="230" height="210" rx="12" class="box s-obs" stroke-width="2"/>
-        <text x="615" y="46" text-anchor="middle" class="bold">📊 Аналитика (/insights)</text>
-        <text x="615" y="72" text-anchor="middle" class="muted">сводка по нашей PG</text>
-        <text x="615" y="96" text-anchor="middle">стоимость, p50/p95, TTFT,</text>
-        <text x="615" y="114" text-anchor="middle">👍-доля, агенты, шаги</text>
-        <text x="615" y="146" text-anchor="middle" class="muted">вопрос: «как дела</text>
-        <text x="615" y="164" text-anchor="middle" class="muted">в целом и сколько стоит?»</text>
-        <text x="615" y="208" text-anchor="middle" class="bold" style="fill:var(--c-obs)">/insights</text>
-
-        <rect x="745" y="20" width="225" height="210" rx="12" class="box s-obs" stroke-width="2"/>
-        <text x="857" y="46" text-anchor="middle" class="bold">🔬 Под капотом (/system)</text>
-        <text x="857" y="72" text-anchor="middle" class="muted">живая анимированная схема</text>
-        <text x="857" y="96" text-anchor="middle">Redis pub/sub → SSE:</text>
-        <text x="857" y="114" text-anchor="middle">кто кому что отправил</text>
-        <text x="857" y="146" text-anchor="middle" class="muted">вопрос: «как это</text>
-        <text x="857" y="164" text-anchor="middle" class="muted">устроено?» (учебная)</text>
-        <text x="857" y="208" text-anchor="middle" class="bold" style="fill:var(--c-obs)">/system</text>
+        <rect x="10" y="12" width="300" height="200" rx="12" class="box s-obs" stroke-width="2"/>
+        <text x="160" y="40" text-anchor="middle" class="bold" font-size="13">📝 Логи (structlog)</text>
+        <text x="160" y="64" text-anchor="middle" class="muted">JSON в stdout контейнера</text>
+        <text x="160" y="92" text-anchor="middle">события: ingest.done,</text>
+        <text x="160" y="110" text-anchor="middle">query.done, eval.finished</text>
+        <text x="160" y="146" text-anchor="middle" class="muted">вопрос: «что сломалось и когда?»</text>
+        <text x="160" y="192" text-anchor="middle" class="bold" style="fill:var(--c-obs)">make logs s=web</text>
+        <rect x="335" y="12" width="300" height="200" rx="12" class="box s-obs" stroke-width="2"/>
+        <text x="485" y="40" text-anchor="middle" class="bold" font-size="13">🔭 Трейсы (Langfuse)</text>
+        <text x="485" y="64" text-anchor="middle" class="muted">дерево шагов каждого запроса</text>
+        <text x="485" y="92" text-anchor="middle">промпт, ответ, чанки, score,</text>
+        <text x="485" y="110" text-anchor="middle">токены, TTFT, стоимость</text>
+        <text x="485" y="146" text-anchor="middle" class="muted">вопрос: «почему ответ плохой?»</text>
+        <text x="485" y="192" text-anchor="middle" class="bold" style="fill:var(--c-obs)">cloud.langfuse.com</text>
+        <rect x="660" y="12" width="300" height="200" rx="12" class="box s-obs" stroke-width="2"/>
+        <text x="810" y="40" text-anchor="middle" class="bold" font-size="13">📈 Метрики (Prometheus)</text>
+        <text x="810" y="64" text-anchor="middle" class="muted">счётчики и гистограммы</text>
+        <text x="810" y="92" text-anchor="middle">HTTP, стадии RAG, токены, $,</text>
+        <text x="810" y="110" text-anchor="middle">ingest, глубина очередей</text>
+        <text x="810" y="146" text-anchor="middle" class="muted">вопрос: «что с системой сейчас?»</text>
+        <text x="810" y="192" text-anchor="middle" class="bold" style="fill:var(--c-obs)">/metrics · make metrics</text>
+        <rect x="10" y="226" width="300" height="200" rx="12" class="box s-obs" stroke-width="2"/>
+        <text x="160" y="254" text-anchor="middle" class="bold" font-size="13">📊 Аналитика (/insights)</text>
+        <text x="160" y="278" text-anchor="middle" class="muted">сводка по нашей PG</text>
+        <text x="160" y="306" text-anchor="middle">стоимость, p50/p95, TTFT,</text>
+        <text x="160" y="324" text-anchor="middle">👍-доля, агенты, шаги</text>
+        <text x="160" y="360" text-anchor="middle" class="muted">вопрос: «сколько стоит и как дела?»</text>
+        <text x="160" y="406" text-anchor="middle" class="bold" style="fill:var(--c-obs)">/insights</text>
+        <rect x="335" y="226" width="300" height="200" rx="12" class="box s-obs" stroke-width="2"/>
+        <text x="485" y="254" text-anchor="middle" class="bold" font-size="13">🎯 Качество (/eval)</text>
+        <text x="485" y="278" text-anchor="middle" class="muted">eval-прогоны golden-датасета</text>
+        <text x="485" y="306" text-anchor="middle">hit@k, faithfulness, отказы,</text>
+        <text x="485" y="324" text-anchor="middle">diff прогонов с 95 % CI</text>
+        <text x="485" y="360" text-anchor="middle" class="muted">вопрос: «стало ли лучше?»</text>
+        <text x="485" y="406" text-anchor="middle" class="bold" style="fill:var(--c-obs)">make eval · /eval</text>
+        <rect x="660" y="226" width="300" height="200" rx="12" class="box s-obs" stroke-width="2"/>
+        <text x="810" y="254" text-anchor="middle" class="bold" font-size="13">🔬 Под капотом (/system)</text>
+        <text x="810" y="278" text-anchor="middle" class="muted">живая анимированная схема</text>
+        <text x="810" y="306" text-anchor="middle">Redis pub/sub → SSE:</text>
+        <text x="810" y="324" text-anchor="middle">кто кому что отправил</text>
+        <text x="810" y="360" text-anchor="middle" class="muted">вопрос: «как это устроено?»</text>
+        <text x="810" y="406" text-anchor="middle" class="bold" style="fill:var(--c-obs)">/system</text>
       </g>
     </svg>
   </figure>
@@ -852,7 +1160,13 @@ svg .bold { font-weight: 700; }
     <b>Стоимость</b><div>Считаем сами: <code>(input − cached) × цена_input + cached × цена_cache + output × цена_output</code>, × 0.5 в off-peak часы DeepSeek. Цены — <code>configs/llm_prices.yaml</code>. Та же сумма уходит в Langfuse.</div>
     <b>👍 / 👎</b><div>Оценка пользователя. Хранится в PG (источник правды) и дублируется score-ом на трейсе ответа в Langfuse — плохие ответы можно отфильтровать и разобрать.</div>
     <b>Ошибки</b><div>Упавшие ответы (ошибка LLM/поиска) и индексации (<code>failed</code>). В трейсе — уровень ERROR и текст ошибки.</div>
-    <b>Качество ответов</b><div><span class="badge b-plan">в плане (итерация 4)</span> eval-харнесс: golden-датасет из 40–60 вопросов; hit@k, recall@k, MRR для поиска; faithfulness и relevancy (RAGAS) для ответов; доля правильных отказов.</div>
+    <b>Качество ответов</b><div><span class="badge b-ok">работает</span> eval-харнесс: golden-датасет из 59 вопросов; hit@k, recall@k, MRR для поиска;
+      faithfulness, relevancy, context precision/recall своим LLM-судьёй; доля правильных отказов. Подробно — <a href="#eval">Workflow 3</a>.</div>
+    <b>Prometheus</b><div><span class="badge b-ok">работает</span> <code>/metrics</code> на web суммирует все процессы (multiprocess mode, общий volume):
+      <code>http_requests_total</code>, <code>http_request_seconds</code>, <code>rag_stage_seconds</code>, <code>rag_answers_total</code>,
+      <code>llm_tokens_total</code>, <code>llm_cost_usd_total</code>, <code>llm_errors_total</code>, <code>ingest_documents_total</code>,
+      <code>ingest_duration_seconds</code>, <code>ingest_chunks_total</code>, <code>embed_batch_seconds</code>, <code>celery_queue_depth</code>.
+      Grafana не поднимаем (память), смотрим <code>make metrics</code>.</div>
   </div>
 
   <div class="note tip"><b>История для интервью: лимит, о который мы ударились.</b>
@@ -888,8 +1202,16 @@ svg .bold { font-weight: 700; }
     <div class="card"><h4>🚦 Классы ошибок</h4>
       <p><code>TransientError</code> → ретрай с экспоненциальной паузой и jitter; <code>PermanentError</code> → сразу <code>failed</code>;
         всё остальное → DLQ. Упал весь воркер — <code>acks_late</code> вернёт задачу в очередь.</p></div>
+    <div class="card"><h4>🔐 Вход и API-ключи</h4>
+      <p>Пароли — argon2id. Сессия — случайный id в cookie, данные в Redis под <code>sha256(id)</code> (дамп Redis не даёт готовых cookie),
+        CSRF-токен для HTMX. API-ключ <code>rag_&lt;prefix&gt;_&lt;secret&gt;</code>: в БД только prefix и <code>sha256(secret)</code> —
+        у секрета 256 бит энтропии, медленный хэш не нужен. Rate limit — скользящее окно в Redis.</p></div>
+    <div class="card"><h4>🧹 Sweeper и DLQ replay</h4>
+      <p>beat раз в минуту запускает sweeper: документ, застрявший в <code>queued</code>/<code>processing</code> дольше порога,
+        переотправляется (задачи идемпотентны, лишний прогон безвреден). Необработанные ошибки лежат в <code>*.dlq</code>;
+        <code>make chaos-embed</code> роняет следующий батч, <code>make dlq-replay</code> возвращает его — документ доходит до done.</p></div>
     <div class="card"><h4>🪂 Деградация, а не падение</h4>
-      <p>Langfuse недоступен → только логи. <span class="badge b-plan">в плане</span>: reranker недоступен → порядок гибридного поиска;
+      <p>Langfuse недоступен → только логи. Сбой LLM-судьи на вопросе → метрика <code>None</code> с причиной, прогон идёт дальше. <span class="badge b-plan">в плане</span>: reranker недоступен → порядок гибридного поиска;
         основной LLM недоступен → fallback на другой провайдер <b>до первого токена</b> (после него переключаться уже нельзя).</p></div>
   </div>
 </section>
@@ -900,21 +1222,22 @@ svg .bold { font-weight: 700; }
   <p class="lead">Всё крутится на VM с 8 ГБ RAM без видеокарты. Поэтому у каждого сервиса жёсткий лимит памяти,
     а модель эмбеддингов вынесена на Windows-хост.</p>
   <figure>
-    <svg viewBox="0 0 900 300" role="img" aria-label="Лимиты памяти">
+    <svg viewBox="0 0 900 416" role="img" aria-label="Лимиты памяти">
       <g font-size="12">
-        <text x="10" y="20" class="bold">Лимит памяти контейнера, МБ</text>
-        <!-- scale: 1 MB = 0.9 px, max 700 -->
-        <g>
-          <text x="10" y="52">Qdrant</text><rect x="120" y="40" width="576" height="18" rx="4" class="k-ai"/><text x="702" y="54">640</text>
-          <text x="10" y="82">worker</text><rect x="120" y="70" width="576" height="18" rx="4" class="k-worker"/><text x="702" y="84">640</text>
-          <text x="10" y="112">PostgreSQL</text><rect x="120" y="100" width="461" height="18" rx="4" class="k-data"/><text x="587" y="114">512</text>
-          <text x="10" y="142">web</text><rect x="120" y="130" width="403" height="18" rx="4" class="k-web"/><text x="529" y="144">448</text>
-          <text x="10" y="172">RabbitMQ</text><rect x="120" y="160" width="346" height="18" rx="4" class="k-data"/><text x="472" y="174">384</text>
-          <text x="10" y="202">Redis</text><rect x="120" y="190" width="173" height="18" rx="4" class="k-data"/><text x="299" y="204">192</text>
-          <text x="10" y="232">Ollama bge-m3</text><rect x="120" y="220" width="706" height="18" rx="4" fill="none" stroke="var(--c-ai)" stroke-dasharray="4 3"/><text x="832" y="234">~2.5 ГБ</text>
-        </g>
-        <text x="10" y="272" class="muted">Ollama работает на Windows-хосте (пунктир): на VM нет AVX-инструкций для быстрого инференса.</text>
-        <text x="10" y="290" class="muted">Langfuse self-hosted потребовал бы ещё ~3.5 ГБ — поэтому Cloud.</text>
+        <text x="10" y="20" class="bold">Лимит памяти контейнера, МБ (compose.yaml)</text>
+        <text x="10" y="53">worker-ingest</text><rect x="120" y="40" width="576" height="18" rx="4" class="k-worker"/><text x="702" y="54">768</text>
+        <text x="10" y="83">Qdrant</text><rect x="120" y="70" width="480" height="18" rx="4" class="k-ai"/><text x="606" y="84">640</text>
+        <text x="10" y="113">PostgreSQL</text><rect x="120" y="100" width="384" height="18" rx="4" class="k-data"/><text x="510" y="114">512</text>
+        <text x="10" y="143">web</text><rect x="120" y="130" width="336" height="18" rx="4" class="k-web"/><text x="462" y="144">448</text>
+        <text x="10" y="173">RabbitMQ</text><rect x="120" y="160" width="288" height="18" rx="4" class="k-data"/><text x="414" y="174">384</text>
+        <text x="10" y="203">worker-embed</text><rect x="120" y="190" width="288" height="18" rx="4" class="k-worker"/><text x="414" y="204">384</text>
+        <text x="10" y="233">eval</text><rect x="120" y="220" width="288" height="18" rx="4" class="k-obs" opacity=".55"/><text x="414" y="234">384 · только на время make eval</text>
+        <text x="10" y="263">Redis</text><rect x="120" y="250" width="144" height="18" rx="4" class="k-data"/><text x="270" y="264">192</text>
+        <text x="10" y="293">beat</text><rect x="120" y="280" width="120" height="18" rx="4" class="k-worker"/><text x="246" y="294">160</text>
+        <text x="10" y="323">Ollama bge-m3</text><rect x="120" y="310" width="700" height="18" rx="4" fill="none" stroke="var(--c-ai)" stroke-dasharray="4 3"/><text x="826" y="324">~2.5 ГБ</text>
+        <text x="10" y="362" class="muted">Ollama работает на Windows-хосте (пунктир): на VM нет AVX-инструкций для быстрого инференса. Бюджет стека на VM ~6.6 ГБ.</text>
+        <text x="10" y="380" class="muted">Пик при индексации «Войны и мира»: worker-ingest 637 МиБ, web 334, worker-embed 269.</text>
+        <text x="10" y="398" class="muted">Langfuse self-hosted потребовал бы ещё ~3.5 ГБ — поэтому Cloud.</text>
       </g>
     </svg>
   </figure>
@@ -926,6 +1249,11 @@ svg .bold { font-weight: 700; }
     <tr><td><code>make smoke</code></td><td>Сквозной тест по живому стенду: агент → книга → done → вопрос → стрим</td></tr>
     <tr><td><code>make demo-traffic</code></td><td>Демо-агенты и вопросы с 👍/👎 для аналитики</td></tr>
     <tr><td><code>make langfuse-check</code></td><td>Отправить тестовый трейс и убедиться, что он дошёл</td></tr>
+    <tr><td><code>make eval AGENT=tolstoi CONFIG=dense</code></td><td>Eval-прогон golden-датасета → PG, markdown-отчёт, Langfuse Datasets (<code>LIMIT=5</code>, <code>JUDGE=0</code> — быстрый прогон)</td></tr>
+    <tr><td><code>make eval-diff A=… B=…</code></td><td>Сравнить два прогона: разница каждой метрики с 95 % CI (парный bootstrap)</td></tr>
+    <tr><td><code>make eval-list</code> / <code>make eval-export RUN=…</code></td><td>Последние прогоны агента / дозалить прогон в Langfuse</td></tr>
+    <tr><td><code>make metrics</code></td><td>Наши ряды Prometheus с <code>/metrics</code></td></tr>
+    <tr><td><code>make chaos-embed</code> / <code>make dlq-replay QUEUE=ingest.embed</code></td><td>Уронить следующий батч в DLQ / вернуть сообщения из DLQ в очередь</td></tr>
   </table>
 </section>
 
@@ -937,12 +1265,12 @@ svg .bold { font-weight: 700; }
       <h4>1. Скелет <span class="badge b-ok">сделано</span></h4><p>сквозной путь: UI → txt → очередь → Qdrant → стрим DeepSeek</p></div>
     <div class="card" style="border-top:4px solid var(--ok)">
       <h4>1.5. Langfuse <span class="badge b-ok">сделано</span></h4><p>трейсы, стоимость, 👍/👎, страница «Аналитика»</p></div>
-    <div class="card" style="border-top:4px solid var(--line)">
-      <h4>2. Фундамент <span class="badge b-plan">план</span></h4><p>вход по паролю, API-ключи, JSON API, CI</p></div>
-    <div class="card" style="border-top:4px solid var(--line)">
-      <h4>3. Ingest <span class="badge b-plan">план</span></h4><p>fb2 / epub / pdf / docx, структурный чанкер, DLQ, фан-аут батчей</p></div>
-    <div class="card" style="border-top:4px solid var(--line)">
-      <h4>4. Eval <span class="badge b-plan">план</span></h4><p>golden-датасет, метрики качества, Prometheus</p></div>
+    <div class="card" style="border-top:4px solid var(--ok)">
+      <h4>2. Фундамент <span class="badge b-ok">сделано</span></h4><p>вход по паролю, API-ключи, JSON API, rate limit · 2026-09-28</p></div>
+    <div class="card" style="border-top:4px solid var(--ok)">
+      <h4>3. Ingest <span class="badge b-ok">сделано</span></h4><p>fb2 / epub / pdf / docx, структурный чанкер, DLQ, фан-аут батчей · 2026-09-28</p></div>
+    <div class="card" style="border-top:4px solid var(--ok)">
+      <h4>4. Eval <span class="badge b-ok">сделано</span></h4><p>golden-датасет, свой LLM-судья, baseline, Prometheus · 2026-09-29</p></div>
     <div class="card" style="border-top:4px solid var(--line)">
       <h4>5. Retrieval <span class="badge b-plan">план</span></h4><p>гибрид dense + BM25, reranker, порог отказа, цитаты</p></div>
     <div class="card" style="border-top:4px solid var(--line)">
@@ -955,7 +1283,8 @@ svg .bold { font-weight: 700; }
       <h4>9–10. Hardening <span class="badge b-plan">план</span></h4><p>безопасность, эксплуатация, MCP-сервер</p></div>
   </div>
   <div class="note">Порядок выбран намеренно: сначала сквозной путь (любое улучшение сразу видно в UI), затем eval (итерация 4) —
-    и только потом тюнинг поиска (итерация 5). Каждое улучшение подтверждается цифрой, а не ощущением.</div>
+    и только потом тюнинг поиска (итерация 5). Baseline уже есть: hit@8 0.833, faithfulness 0.95, multi_hop — слабое место.
+    Каждое следующее улучшение сравнивается с ним через <code>make eval-diff</code>.</div>
 </section>
 
 <!-- ============================ 12. INTERVIEW ============================ -->
@@ -976,9 +1305,25 @@ svg .bold { font-weight: 700; }
       3) Каждое утверждение со ссылкой [n], пользователь может проверить источник. 4) Текст источников экранирован и помечен как данные
       (защита от prompt injection). В плане: порог отказа по score reranker-а, откалиброванный на golden-датасете, и пост-проверка цитат.</p></details>
   <details class="qa"><summary>Как измеряете качество?</summary>
-    <p>Сейчас: трейсы (видно, какие фрагменты нашлись и что ответила модель) и 👍/👎 пользователей. Итерация 4: golden-датасет из 40–60
-      вопросов четырёх категорий (включая «вне корпуса» и prompt injection), retrieval-метрики hit@k, recall@k, MRR, RAGAS faithfulness/relevancy
-      с LLM-судьёй, парный bootstrap для сравнения двух конфигураций. Любое изменение поиска/чанкинга/промпта — только с eval-прогоном.</p></details>
+    <p>Golden-датасет из 59 вопросов пяти категорий (factual, interpretive, multi_hop, out_of_corpus 22 %, injection) с эталоном,
+      ключевыми фактами и ожидаемыми главами. Runner гоняет его через тот же <code>QueryService</code>, что отвечает пользователю.
+      Retrieval-метрики считаются формулой, генерацию оценивает свой LLM-судья. Baseline dense: hit@8 0.833, recall@8 0.786, MRR 0.572,
+      faithfulness 0.95, answer relevancy 0.64, refusal precision/recall 0.93/0.82. Слабое место — multi_hop (recall@8 0.50).
+      Плюс в проде — трейсы и 👍/👎. Любое изменение поиска, чанкинга или промпта — только с eval-прогоном и diff к baseline.</p></details>
+  <details class="qa"><summary>Почему свой LLM-судья, а не RAGAS?</summary>
+    <p>RAGAS тянет LangChain (в проекте сознательно не используем) и десятки зависимостей; промпты у него английские и меняются
+      между версиями, так что метрика «плывёт» от обновления пакета. Свой судья — ~200 строк: русские промпты под корпус, JSON-режим,
+      версия <code>judge_v1</code> фиксируется в прогоне, unit-тесты на записанных ответах. Цена — цифры не сравнимы 1:1 с опубликованными
+      RAGAS, а смещение судьи (DeepSeek оценивает DeepSeek) ещё надо проверить сверкой с Claude.</p></details>
+  <details class="qa"><summary>Как понять, что улучшение не шум?</summary>
+    <p>На 59 вопросах разница в несколько пунктов может быть случайной. Парный bootstrap: 10 000 ресэмплов вопросов с возвращением,
+      разница B − A на одних и тех же вопросах, 95 % доверительный интервал. «Лучше» — только если интервал целиком выше нуля.
+      В реальном сравнении двух прогонов <code>has_citation</code> +0.10 [+0.03; +0.21] — улучшение, а faithfulness +0.02 [−0.02; +0.07] — шум.</p></details>
+  <details class="qa"><summary>Как устроен ingest большой книги и что будет, если воркер упадёт?</summary>
+    <p>worker-ingest парсит и режет книгу на чанки, пишет их в PG и публикует задачу на каждый батч из 32 чанков в отдельную очередь.
+      worker-embed считает векторы и делает upsert в Qdrant; документ закрывает тот батч, чей атомарный <code>+1</code> догнал счётчик.
+      Упал воркер — <code>acks_late</code> вернёт задачу, повтор безопасен (claim, uuid5-id точек); застрявший документ подберёт sweeper,
+      неожиданная ошибка уйдёт в DLQ. Проверено: <code>docker kill worker-embed</code> посреди «Войны и мира» — книга дошла до done (~17 мин, 2873 чанка).</p></details>
   <details class="qa"><summary>Почему Celery + RabbitMQ, а не просто Redis-очередь?</summary>
     <p>Индексация книги — десятки секунд, её нельзя делать в HTTP-запросе. RabbitMQ даёт подтверждения после выполнения (<code>acks_late</code>),
       dead-letter очереди и не теряет сообщения при рестарте. Celery — зрелые ретраи и мониторинг. Код async, поэтому задача — тонкая
@@ -992,12 +1337,16 @@ svg .bold { font-weight: 700; }
       везде совпадают. Кэш префикса промпта дополнительно экономит: стабильная часть (правила) идёт первой.</p></details>
   <details class="qa"><summary>Где узкое место и как бы вы масштабировали?</summary>
     <p>Индексация: 95 % времени — эмбеддинги на CPU. Решения: GPU или отдельный embedding-сервис, фан-аут батчей по нескольким воркерам
-      (итерация 3), кэш эмбеддингов. Ответ: время до первого токена — это «думанье» модели; снижается <code>reasoning_effort</code>,
+      (сделано в итерации 3: два процесса worker-embed), кэш эмбеддингов. Ответ: время до первого токена — это «думанье» модели; снижается <code>reasoning_effort</code>,
       семантическим кэшем повторных вопросов (итерация 7). Сводка аналитики сейчас агрегируется в Python — при росте переносится в SQL.</p></details>
   <details class="qa"><summary>Что было самым неожиданным?</summary>
     <p>1) Reasoning-модель может потратить весь лимит токенов на «думанье» и вернуть пустой ответ — поэтому reasoning-токены видны под ответом
       и в трейсе. 2) Лимит Metrics API Langfuse — 100 запросов в сутки на бесплатном тарифе; страница аналитики его выела за 15 минут, и её
-      пришлось перевести на свою БД. 3) У новых организаций Langfuse старый API чтения трейсов отключён (HTTP 410).</p></details>
+      пришлось перевести на свою БД. 3) У новых организаций Langfuse старый API чтения трейсов отключён (HTTP 410).
+      4) Qdrant падал с <code>SIGILL</code>, как только корпус перевалил порог индексации: int8-квантизация + HNSW на CPU без AVX.
+      Квантизация стала настройкой (по умолчанию выключена). 5) Celery убивал своих детей по кругу: лимит памяти считал общие
+      copy-on-write страницы токенизатора, а новый ребёнок не успевал стартовать за 4 с — задача бесконечно возвращалась в очередь
+      без единой ошибки. Нашёл нагрузочный прогон на реальной книге, а не тесты.</p></details>
 </section>
 
 </main>

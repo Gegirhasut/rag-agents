@@ -32,6 +32,7 @@ from rag_agents.services.query import QueryService
 from tests.fakes import (
     KeywordEmbedder,
     RecordingPublisher,
+    RecordingTraceBus,
     RecordingTracer,
     ScriptedLLM,
     WordCounter,
@@ -253,3 +254,39 @@ async def test_eval_trace_is_separate_session_and_not_saved_to_chat(
     assert root.trace_attrs["session_id"] == f"eval-{run_id}"
     assert root.trace_attrs["tags"] == ["Мини-Толстой", "eval"]
     assert ans.trace_id == root.trace_id
+
+
+async def test_eval_run_animates_its_own_node_on_live_scheme(
+    mini: tuple[Container, RecordingPublisher],
+) -> None:
+    """На /system прогон виден как узел eval: тот же конвейер, но без web и браузера."""
+    c, publisher = mini
+    _, agent = await _corpus(c, publisher)
+    bus = RecordingTraceBus()
+    c.query.trace = bus  # type: ignore[assignment]  # фейк шины без Redis
+    golden, sha = load_dataset(DATASET)
+    runner = EvalRunner(
+        c.query,
+        c.evals,
+        NoopTracer(),
+        PriceTable({}),
+        LLMJudge(judge_llm()),
+        bus,  # type: ignore[arg-type]
+    )
+    config = EvalConfig(name="dense", retrieval=RetrievalSettings(top_k=2), search_k=5)
+    await runner.run(
+        agent, golden[:2], dataset="eval_mini", dataset_sha=sha, config=config, snapshot={}
+    )
+
+    nodes = {n for _, src, dst in bus.events for n in (src, dst) if n}
+    assert "web" not in nodes
+    assert "browser" not in nodes
+    edges = {(src, dst) for _, src, dst in bus.events}
+    assert {("eval", "ollama"), ("ollama", "eval"), ("eval", "qdrant"), ("eval", "llm")} <= edges
+    kinds = [k for k, _, _ in bus.events]
+    assert kinds[0] == "eval.started"
+    assert kinds[-1] == "eval.finished"
+    assert kinds.count("eval.question") == kinds.count("eval.scored") == 2
+    assert kinds.count("eval.judge") == 2
+    assert "query.done" in kinds  # ответ готов — внутри узла eval, без записи в чат
+    assert ("query.done", "eval", None) in bus.events

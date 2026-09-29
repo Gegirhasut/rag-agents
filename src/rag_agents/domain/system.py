@@ -20,6 +20,8 @@ Node = Literal[
     "qdrant",
     "ollama",
     "llm",
+    "langfuse",
+    "eval",
 ]
 
 

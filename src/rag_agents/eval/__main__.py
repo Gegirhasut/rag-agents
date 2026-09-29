@@ -119,6 +119,13 @@ async def _export_langfuse(
                 await lf.link_run_item(
                     run_name, f"{dataset}:{it.item_id}", it.trace_id, {"eval_run_id": str(run.id)}
                 )
+        await settings_c.trace.emit(
+            "eval.export",
+            "eval",
+            "langfuse",
+            f"Langfuse Datasets: датасет {dataset} ({len(golden)} вопр.) + прогон «{run_name}»",
+            agent_id=run.agent_id,
+        )
         typer.echo(f"Langfuse Datasets: {dataset} → прогон «{run_name}»")
     except LangfuseApiError as e:
         typer.echo(f"Langfuse Datasets: не выгружено ({e})", err=True)
@@ -144,7 +151,7 @@ def run(
     async def _run(c: Container) -> None:
         target = await c.evals.resolve_agent(agent)
         llm_judge = LLMJudge(c.llm) if judge and cfg.judge else None
-        runner = EvalRunner(c.query, c.evals, c.tracer, c.query.prices, llm_judge)
+        runner = EvalRunner(c.query, c.evals, c.tracer, c.query.prices, llm_judge, c.trace)
         typer.echo(f"eval: «{target.name}» × {dataset.name} ({len(golden)} вопр.) × {cfg.name}")
         result_run, results = await runner.run(
             target,

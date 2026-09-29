@@ -1,0 +1,52 @@
+/* Страница «Качество» (/eval). Поверх insights.css: те же KPI-плитки и .chart-box. */
+.evalp {
+  --c-retrieval: #4f7df3;
+  --c-answer: #8b5cf6;
+  --c-citations: #14a6b8;
+  --c-refusal: #eb6834;
+  --c-up: #19a974;
+  --c-down: #e5484d;
+  --c-noise: #8a94a6;
+}
+.evalp .chart-tall { height: 340px; }
+.evalp .meter-ok { background: var(--bs-tertiary-bg); }
+.evalp .meter-ok > span { background: var(--c-retrieval); }
+
+.legend-row { display: flex; flex-wrap: wrap; gap: .25rem 1rem; }
+.legend-row .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: .35rem; vertical-align: -1px; }
+.sw-retrieval { background: var(--c-retrieval); }
+.sw-answer { background: var(--c-answer); }
+.sw-citations { background: var(--c-citations); }
+.sw-refusal { background: var(--c-refusal); }
+
+/* категории вопросов */
+.badge[class*="cat-"] { font-weight: 500; }
+.cat-factual { background: rgba(79, 125, 243, .15); color: #4f7df3; }
+.cat-interpretive { background: rgba(139, 92, 246, .15); color: #8b5cf6; }
+.cat-multi_hop { background: rgba(20, 166, 184, .15); color: #14a6b8; }
+.cat-out_of_corpus { background: rgba(235, 104, 52, .15); color: #eb6834; }
+.cat-injection { background: rgba(229, 72, 77, .15); color: #e5484d; }
+
+/* вывод сравнения */
+.v-up { background: rgba(25, 169, 116, .15); color: var(--c-up); }
+.v-down { background: rgba(229, 72, 77, .15); color: var(--c-down); }
+.v-noise { background: var(--bs-secondary-bg); color: var(--bs-secondary-color); font-weight: 500; }
+.diff td, .diff th { font-variant-numeric: tabular-nums; }
+
+/* порог отказа */
+.tau .form-range { max-width: 28rem; }
+.tau-stat { display: inline-block; margin-right: 1rem; }
+.tau-stat b { font-variant-numeric: tabular-nums; }
+
+/* худшие вопросы */
+.worst summary { cursor: pointer; list-style: none; }
+.worst summary::-webkit-details-marker { display: none; }
+.worst .list-group-item[open] { background: var(--bs-tertiary-bg); }
+.q-score { flex: none; font-variant-numeric: tabular-nums; font-size: .8rem; padding: 0 .4rem; border-radius: .3rem;
+  color: #fff; background: color-mix(in srgb, var(--c-up) calc(var(--q) * 100%), var(--c-down)); }
+.chip { display: inline-block; padding: 0 .45rem; border-radius: 999px; background: var(--bs-secondary-bg); font-size: .78rem; }
+
+/* таблица вопросов: ячейка подсвечивается от красного (0) к зелёному (1) */
+.items .cell { font-variant-numeric: tabular-nums; padding: 0 .3rem; border-radius: .25rem;
+  background: color-mix(in srgb, color-mix(in srgb, var(--c-up) calc(var(--v) * 100%), var(--c-down)) 22%, transparent); }
+.evalp details.card > summary { cursor: pointer; list-style: none; }

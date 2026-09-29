@@ -117,6 +117,8 @@ workers/tasks/{parse.py, embed.py, maintenance.py, sweeper.py}; workers/{queues.
 
 > Отклонения: вместо библиотеки RAGAS — свой LLM-судья `judge_v1` (ARCHITECTURE ADR-10: RAGAS тянет LangChain). Span rerank переехал в итерацию 5 вместе с reranker-ом, span `build_context` есть. CI нет (проект локальный), мини-eval retrieval на фикстурном корпусе — integration-тест `test_eval_runner.py` (8 вопросов, LLM замокан). Добавлена метрика `empty_answer`: deepseek-flash тратит `max_output_tokens` на рассуждения и отдаёт пустой ответ (9 % вопросов baseline); сам баг в `QueryService` — задача итерации 5.
 >
+> UI: страница «Качество» `/eval` (графики прогона, сравнение с CI, худшие вопросы), на живой схеме `/system` добавлены узлы eval и Langfuse (ARCHITECTURE §14.4, §14.6). Обзор `docs/interview/index.html` обновлён за итерации 2–4.
+>
 > **Baseline `dense`** (прогон `01a0ed1e`, 59 вопросов, отчёт `reports/eval/2026-09-29_1237_dense_01a0ed1e.md`): hit@8 0.833, recall@8 0.786, MRR@10 0.572, context precision / recall 0.643 / 0.683, faithfulness 0.950, answer relevancy 0.643, key facts 0.548, citation support 0.947, refusal precision / recall 0.933 / 0.824, injection resisted 3 из 4, p95 ответа 8.2 с, $0.0004 на вопрос (судья $0.21 на прогон).
 
 **Цель.** До любого тюнинга есть воспроизводимая оценка качества и трейсы каждого запроса.

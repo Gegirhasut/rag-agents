@@ -14,6 +14,7 @@ from rag_agents.core.db import Database
 from rag_agents.domain.agents import AgentCreate, AgentOut, AgentSettings
 from rag_agents.domain.documents import ChunkPayload
 from rag_agents.domain.enums import DocumentStatus, MessageRole, MessageStatus
+from rag_agents.eval.metrics import aggregate
 from rag_agents.models.entities import Document
 from rag_agents.rag.index.qdrant import QdrantChunkIndex, chunk_point_id, collection_name
 from rag_agents.repositories.agents import AgentRepository
@@ -290,6 +291,8 @@ FOREIGN_CASES: list[tuple[str, str, str]] = [
     ("GET", "/system/agents/{agent}/vector-map", "web"),
     ("GET", "/system/agents/{agent}/points/{point}", "web"),
     ("DELETE", "/settings/api-keys/{key}", "web"),
+    ("GET", "/eval/agents/{agent}", "web"),
+    ("GET", "/eval/agents/{agent}/runs/{run}", "web"),
     ("GET", "/api/v1/agents/{agent}", "api"),
     ("PATCH", "/api/v1/agents/{agent}", "api"),
     ("DELETE", "/api/v1/agents/{agent}", "api"),
@@ -315,6 +318,7 @@ _PLACEHOLDER_NAMES = {
     "message_id": "msg",
     "point_id": "point",
     "key_id": "key",
+    "run_id": "run",
 }
 
 
@@ -332,10 +336,11 @@ def _declared_routes() -> set[tuple[str, str]]:
         documents,
         insights,
         pages,
+        quality,
         system,
     )
 
-    web = [auth, chat, documents, insights, pages, system]
+    web = [auth, chat, documents, insights, pages, quality, system]
     api = [api_agents, api_documents, api_keys, api_query]
     out: set[tuple[str, str]] = set()
     for prefix, modules in (("", web), ("/api/v1", api)):
@@ -366,6 +371,10 @@ async def alice_data(stack: Stack) -> dict[str, str]:
     doc, _ = await c.documents.upload(alice.id, agent.id, "a.txt", _bytes("секрет Алисы"))
     pair = await c.query.ask(alice.id, agent.id, None, "Что там?")
     key = await c.auth.issue_key(alice.id, "alice")
+    run = await c.evals.start_run(
+        agent.id, dataset="d", dataset_sha="0", config_name="dense", config={}
+    )
+    await c.evals.finish_run(agent.id, run.id, aggregate([]))
     return {
         "user": str(alice.id),
         "email": alice.email,
@@ -376,6 +385,7 @@ async def alice_data(stack: Stack) -> dict[str, str]:
         "msg": str(pair.answer.id),
         "point": str(uuid4()),
         "key": str(key.id),
+        "run": str(run.id),
     }
 
 
@@ -446,6 +456,26 @@ async def test_owner_reaches_same_endpoints(stack: Stack, alice_data: dict[str, 
             else:
                 r = await stack.client.get(url, headers=bearer)
             assert r.status_code == 200, f"{url} → {r.status_code}"
+    finally:
+        await session.aclose()
+
+
+async def test_foreign_eval_run_via_own_agent_is_not_found(
+    stack: Stack, alice_data: dict[str, str]
+) -> None:
+    """Прогон читается только через своего агента: свой агент + чужой run_id → 404."""
+    carol = await stack.user()
+    own = await stack.container.agents.create(carol.id, AgentCreate(name="Кэрол"))
+    session = Session(stack)
+    await session.login(carol.email)
+    try:
+        for url in (
+            f"/eval/agents/{own.id}/runs/{alice_data['run']}",
+            f"/eval/agents/{own.id}",  # свой агент без прогонов — пустая страница, не 404
+        ):
+            r = await session.http.get(url, headers=session.hx())
+            assert r.status_code == (200 if url.endswith(str(own.id)) else 404), url
+        assert "Прогонов пока нет" in r.text
     finally:
         await session.aclose()
 

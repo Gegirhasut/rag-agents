@@ -1,0 +1,290 @@
+{% extends "base.html" %}
+{% block title %}Качество — RAG-агенты{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="/static/insights.css">
+<link rel="stylesheet" href="/static/eval.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" defer></script>
+<script src="/static/eval.js" defer></script>
+{% endblock %}
+{% macro f(v, digits=3) %}{% if v is none %}—{% else %}{{ "%.*f"|format(digits, v) }}{% endif %}{% endmacro %}
+{% block content %}
+<div class="insights evalp">
+<div class="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-3">
+  <div>
+    <h1 class="h3 mb-1">🎯 Качество</h1>
+    <p class="text-body-secondary mb-0">Прогоны golden-датасета через тот же конвейер, что отвечает пользователю:
+      находит ли поиск нужную главу, опирается ли ответ на источники, отказывает ли агент там, где ответа нет.
+      Любое изменение поиска, чанкинга или промпта подтверждается здесь цифрой.</p>
+  </div>
+  {% if agents %}
+  <div class="d-flex align-items-center gap-2">
+    <label class="small text-body-secondary" for="eval-agent">Агент</label>
+    <select id="eval-agent" class="form-select form-select-sm w-auto"
+            onchange="location.href='/eval/agents/' + this.value">
+      {% for a in agents %}<option value="{{ a.agent.id }}"{% if agent and a.agent.id == agent.agent.id %} selected{% endif %}>{{ a.agent.name }}</option>{% endfor %}
+    </select>
+  </div>
+  {% endif %}
+</div>
+
+{% if not agents or not page %}
+<div class="card"><div class="card-body">
+  <h2 class="h5">Прогонов пока нет</h2>
+  <p class="mb-2">Eval запускается из консоли: одноразовый контейнер <code>eval</code> прогоняет вопросы датасета
+    через <code>QueryService</code>, считает метрики, а LLM-судья оценивает ответы.</p>
+  <pre class="mb-2"><code>make eval AGENT={{ agent.agent.slug if agent else "tolstoi" }} DATASET=tolstoy CONFIG=dense   # ~25 мин, ~$0.25
+make eval AGENT=… LIMIT=5 JUDGE=0                                  # быстрый прогон без судьи</code></pre>
+  <p class="small text-body-secondary mb-0">Датасеты — <code>eval/datasets/*.jsonl</code>, конфигурации — <code>configs/eval/*.yaml</code>
+    (ARCHITECTURE §15).</p>
+</div></div>
+{% else %}
+{% set run = page.run %}
+{% set s = page.summary %}
+
+{# ---------- шапка прогона ---------- #}
+<div class="card mb-3"><div class="card-body py-2 d-flex flex-wrap gap-3 align-items-center small">
+  <span><span class="k">прогон</span><code>{{ run.id|string|truncate(8, true, "") }}</code></span>
+  <span><span class="k">конфиг</span><b>{{ run.config_name }}</b></span>
+  <span><span class="k">датасет</span>{{ run.dataset }} · {{ s.questions }} вопросов{% if s.errors %} · <span class="text-danger">{{ s.errors }} ошибок</span>{% endif %}</span>
+  <span><span class="k">начат</span><time datetime="{{ run.started_at.isoformat() }}" data-fmt="datetime"></time></span>
+  {% set llm = run.config.get("llm") or {} %}
+  <span><span class="k">LLM</span>{{ llm.get("model", "—") }}{% if llm.get("reasoning_effort") %} · effort {{ llm.reasoning_effort }}{% endif %}</span>
+  <span><span class="k">top_k</span>{{ (run.config.get("retrieval") or {}).get("top_k", "—") }}</span>
+  <span><span class="k">промпт</span>{{ run.config.get("prompt_version", "—") }}</span>
+  {% if page.judge %}<span><span class="k">судья</span>{{ page.judge }}</span>{% endif %}
+  {% if run.config.get("git_sha") %}<span><span class="k">git</span><code>{{ run.config.git_sha }}</code></span>{% endif %}
+</div></div>
+
+{# ---------- KPI ---------- #}
+{% set kpis = [
+  ("hit@8", "Нашли нужную главу", "в top-8 кандидатов"),
+  ("recall@8", "Recall@8", "доля ожидаемых глав"),
+  ("mrr@10", "MRR@10", "насколько высоко первая верная"),
+  ("faithfulness", "Faithfulness", "утверждений подтверждено источниками"),
+  ("answer_relevancy", "Answer relevancy", "ответ по существу вопроса"),
+] %}
+<div class="row g-3 mb-3">
+  {% for key, title, sub in kpis %}{% set m = page.metric(key) %}
+  <div class="col-6 col-md-4 col-xl-2">
+    <div class="card kpi h-100"><div class="card-body">
+      <div class="kpi-label">{{ title }}</div>
+      <div class="kpi-value">{{ f(m.mean if m else none, 2) }}</div>
+      <div class="kpi-sub">{{ sub }}{% if m %} · n={{ m.n }}{% endif %}</div>
+      {% if m %}<div class="meter meter-ok mt-1"><span style="width: {{ (m.mean * 100)|round(1) }}%"></span></div>{% endif %}
+    </div></div>
+  </div>
+  {% endfor %}
+  {% set r = s.refusal or {} %}
+  <div class="col-6 col-md-4 col-xl-2">
+    <div class="card kpi h-100"><div class="card-body">
+      <div class="kpi-label" title="Отказ как классификатор «в корпусе нет ответа»">Отказы P / R</div>
+      <div class="kpi-value">{{ f(r.precision, 2) }} <span class="kpi-value-sub">/ {{ f(r.recall, 2) }}</span></div>
+      <div class="kpi-sub">верных {{ r.tp }} · лишних {{ r.fp }} · пропущено {{ r.fn }}</div>
+    </div></div>
+  </div>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-lg-6">
+    <div class="card h-100">
+      <div class="card-header"><strong>Все метрики прогона</strong>
+        <span class="small text-body-secondary">— среднее по вопросам, где метрика определена</span></div>
+      <div class="card-body">
+        <div class="chart-box chart-tall"><canvas id="ch-metrics" aria-label="Средние метрики прогона"></canvas></div>
+        <div class="legend-row small text-body-secondary mt-2">
+          <span><i class="sw sw-retrieval"></i>поиск</span><span><i class="sw sw-answer"></i>ответ (LLM-судья)</span>
+          <span><i class="sw sw-citations"></i>цитаты</span><span><i class="sw sw-refusal"></i>отказы и защита</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-6">
+    <div class="card h-100">
+      <div class="card-header"><strong>По категориям вопросов</strong>
+        <span class="small text-body-secondary">— где агент слабее</span></div>
+      <div class="card-body">
+        <div class="chart-box chart-tall"><canvas id="ch-categories" aria-label="Метрики по категориям"></canvas></div>
+        <p class="small text-body-secondary mb-0 mt-2">У «вне корпуса» и «инъекций» правильный ответ — отказ, поэтому для них есть
+          только «верный отказ».</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-lg-7">
+    <div class="card h-100">
+      <div class="card-header"><strong>Где проходит граница «есть ответ / нет ответа»</strong>
+        <span class="small text-body-secondary">— лучший score поиска по каждому вопросу</span></div>
+      <div class="card-body">
+        <div class="chart-box"><canvas id="ch-threshold" aria-label="Лучший dense-score вопросов по категориям"></canvas></div>
+        <div class="tau mt-2">
+          <label class="small" for="tau">Порог отказа τ по dense-score: <b id="tau-val">0.50</b></label>
+          <input id="tau" type="range" class="form-range" min="0.35" max="0.70" step="0.005" value="0.50">
+          <div id="tau-stats" class="small"></div>
+        </div>
+        <p class="small text-body-secondary mb-0 mt-1">Сейчас агент отказывает только словами модели. В итерации 5 отказ
+          до LLM по порогу, откалиброванному на этих точках. Ползунок показывает, что было бы при пороге по dense-score:
+          облака «в корпусе» и «вне корпуса» сильно перекрываются, поэтому нужен reranker.</p>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-5">
+    <div class="card h-100">
+      <div class="card-header"><strong>Динамика по прогонам</strong>
+        <span class="small text-body-secondary">— датасет {{ run.dataset }}</span></div>
+      <div class="card-body">
+        <div class="chart-box"><canvas id="ch-trend" aria-label="Метрики по прогонам"></canvas></div>
+        <p class="small text-body-secondary mb-0 mt-2">Клик по точке открывает прогон. Скачки между одинаковыми
+          конфигурациями — шум LLM и судьи: поэтому сравнение ниже идёт с доверительным интервалом.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ---------- сравнение ---------- #}
+<div class="card mb-3">
+  <div class="card-header d-flex flex-wrap align-items-center gap-2">
+    <strong>Сравнение с прогоном</strong>
+    <select class="form-select form-select-sm w-auto" aria-label="База сравнения"
+            onchange="location.href='/eval/agents/{{ agent.agent.id }}/runs/{{ run.id }}' + (this.value ? '?base=' + this.value : '')">
+      {% for r in runs if r.id != run.id and r.finished_at %}
+      <option value="{{ r.id }}"{% if page.base and r.id == page.base.id %} selected{% endif %}>
+        {{ r.config_name }} · {{ r.dataset }} · {{ r.started_at.strftime("%d.%m %H:%M") }} UTC · {{ r.id|string|truncate(8, true, "") }}</option>
+      {% endfor %}
+    </select>
+    <span class="small text-body-secondary">парный bootstrap по вопросам, 10 000 ресэмплов, 95 % CI разницы «этот − база»</span>
+  </div>
+  <div class="card-body">
+  {% if page.base %}
+    {% if page.base.config.get("judge") != run.config.get("judge") %}
+    <div class="alert alert-warning small py-2">Разные версии судьи: сопоставимы только метрики поиска.</div>
+    {% endif %}
+    <div class="row g-3">
+      <div class="col-lg-6">
+        <div class="chart-box chart-tall"><canvas id="ch-diff" aria-label="Разница метрик с 95% CI"></canvas></div>
+      </div>
+      <div class="col-lg-6">
+        <div class="table-responsive">
+        <table class="table table-sm small align-middle mb-0 diff">
+          <thead><tr><th>Метрика</th><th class="text-end">n</th><th class="text-end">база</th><th class="text-end">этот</th>
+            <th class="text-end">Δ</th><th>95 % CI</th><th>вывод</th></tr></thead>
+          <tbody>
+          {% for d in page.diff %}
+            <tr><td>{{ d.label }}</td><td class="text-end">{{ d.n }}</td><td class="text-end">{{ f(d.a) }}</td>
+              <td class="text-end">{{ f(d.b) }}</td><td class="text-end">{{ "%+.3f"|format(d.diff) }}</td>
+              <td class="text-nowrap">[{{ "%+.3f"|format(d.lo) }}; {{ "%+.3f"|format(d.hi) }}]</td>
+              <td><span class="badge v-{{ {'лучше': 'up', 'хуже': 'down'}.get(d.verdict, 'noise') }}">{{ d.verdict }}</span></td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+    <p class="small text-body-secondary mb-0 mt-2">«Лучше» или «хуже» — только если весь интервал по одну сторону от нуля.
+      При 40–60 вопросах разница в 3–5 пунктов обычно шум. То же в консоли: <code>make eval-diff A={{ page.base.id }} B={{ run.id }}</code>.</p>
+  {% else %}
+    <p class="small text-body-secondary mb-0">Других завершённых прогонов пока нет — сравнивать не с чем.</p>
+  {% endif %}
+  </div>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-lg-7">
+    <div class="card h-100">
+      <div class="card-header"><strong>10 худших вопросов</strong>
+        <span class="small text-body-secondary">— с них начинается разбор</span></div>
+      <div class="list-group list-group-flush worst">
+        {% for it, q in page.worst() %}
+        <details class="list-group-item">
+          <summary class="d-flex gap-2 align-items-baseline">
+            <span class="badge cat-{{ it.category.value }}">{{ category_labels[it.category] }}</span>
+            <span class="flex-grow-1">{{ it.question }}</span>
+            <span class="q-score" style="--q: {{ [q, 0]|max }}">{{ f(q, 2) if q >= 0 else "ошибка" }}</span>
+          </summary>
+          <div class="mt-2 small">
+            <div class="answer-text border rounded p-2 mb-2">{{ it.answer or ("пустой ответ" if not it.error else "ошибка: " ~ it.error) }}</div>
+            <div class="d-flex flex-wrap gap-2 mb-1">
+              {% for k in ("hit@8", "recall@8", "faithfulness", "answer_relevancy", "key_facts_coverage", "refusal_correct", "empty_answer") %}
+                {% if it.scores.get(k) is not none %}<span class="chip">{{ labels[k][0] }} <b>{{ f(it.scores[k], 2) }}</b></span>{% endif %}
+              {% endfor %}
+            </div>
+            <div class="text-body-secondary">Найдено: {% for r in it.retrieved[:5] %}<span class="{{ 'text-success fw-semibold' if r.relevant }}">{{ r.book_title }} / {{ r.section_path|join(" / ") }} ({{ "%.3f"|format(r.score) }})</span>{% if not loop.last %} · {% endif %}{% endfor %}</div>
+            {% if it.trace_id %}<a class="small" href="/insights/traces/{{ it.trace_id }}">🔎 трейс вопроса</a>{% endif %}
+          </div>
+        </details>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-5">
+    <div class="card h-100">
+      <div class="card-header"><strong>Скорость и цена</strong></div>
+      <div class="card-body">
+        <div class="d-flex flex-wrap gap-4 mb-2 small">
+          <div><div class="kpi-label">ответ p50 / p95</div><b>{{ s.latency_ms.p50|ms }}</b> / {{ s.latency_ms.p95|ms }}</div>
+          <div><div class="kpi-label">первый токен p50 / p95</div><b>{{ s.ttft_ms.p50|ms }}</b> / {{ s.ttft_ms.p95|ms }}</div>
+          <div><div class="kpi-label">ответы · судья</div><b>{{ s.cost_usd.answers|usd }}</b> · {{ (s.cost_usd.judge or 0)|usd }}</div>
+        </div>
+        <div class="chart-box"><canvas id="ch-latency" aria-label="Время ответа по вопросам"></canvas></div>
+        <p class="small text-body-secondary mb-0 mt-2">Каждый столбик — вопрос: тёмная часть — ожидание первого токена
+          (поиск + «думанье» reasoning-модели), светлая — стрим ответа. Отказы без LLM — почти нулевые.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ---------- все вопросы ---------- #}
+<details class="card mb-3">
+  <summary class="card-header"><strong>Все вопросы прогона ({{ page.items|length }})</strong></summary>
+  <div class="table-responsive">
+  <table class="table table-sm small align-middle mb-0 items">
+    <thead><tr><th>id</th><th>категория</th><th>вопрос</th>
+      {% for k in ("hit@8", "mrr@10", "faithfulness", "answer_relevancy", "refusal_correct") %}<th class="text-end">{{ labels[k][0] }}</th>{% endfor %}
+      <th class="text-end">мс</th><th></th></tr></thead>
+    <tbody>
+    {% for it in page.items %}
+      <tr><td><code>{{ it.item_id }}</code></td><td><span class="badge cat-{{ it.category.value }}">{{ category_labels[it.category] }}</span></td>
+        <td>{{ it.question }}</td>
+        {% for k in ("hit@8", "mrr@10", "faithfulness", "answer_relevancy", "refusal_correct") %}
+          {% set v = it.scores.get(k) %}
+          <td class="text-end">{% if v is none %}<span class="text-body-tertiary">—</span>{% else %}<span class="cell" style="--v: {{ v }}">{{ f(v, 2) }}</span>{% endif %}</td>
+        {% endfor %}
+        <td class="text-end">{{ it.latency_ms or "—" }}</td>
+        <td>{% if it.trace_id %}<a href="/insights/traces/{{ it.trace_id }}" title="трейс">🔎</a>{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</details>
+{% endif %}
+
+{% if runs %}
+<div class="card mb-3">
+  <div class="card-header"><strong>Прогоны агента</strong> <span class="small text-body-secondary">— последние {{ runs|length }}</span></div>
+  <div class="table-responsive">
+  <table class="table table-sm table-hover small align-middle mb-0">
+    <thead><tr><th>начат</th><th>конфиг</th><th>датасет</th>
+      {% for k in ("hit@8", "recall@8", "mrr@10", "faithfulness", "answer_relevancy", "refusal_correct") %}<th class="text-end">{{ labels[k][0] }}</th>{% endfor %}
+      <th>id</th></tr></thead>
+    <tbody>
+    {% for r in runs %}{% set h = headline(r) %}
+      <tr class="{{ 'table-active' if page and r.id == page.run.id }}">
+        <td><time datetime="{{ r.started_at.isoformat() }}" data-fmt="datetime"></time></td>
+        <td>{{ r.config_name }}</td><td>{{ r.dataset }}</td>
+        {% for k in ("hit@8", "recall@8", "mrr@10", "faithfulness", "answer_relevancy", "refusal_correct") %}<td class="text-end">{{ f(h[k], 3) }}</td>{% endfor %}
+        <td>{% if r.finished_at %}<a href="/eval/agents/{{ agent.agent.id }}/runs/{{ r.id }}"><code>{{ r.id|string|truncate(8, true, "") }}</code></a>{% else %}<span class="text-body-secondary">идёт…</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+</div>
+
+{% if page %}
+<script id="eval-data" type="application/json">{{ page.charts | tojson }}</script>
+<script id="eval-meta" type="application/json">{{ {"agent": agent.agent.id|string, "run": page.run.id|string} | tojson }}</script>
+{% endif %}
+{% endblock %}

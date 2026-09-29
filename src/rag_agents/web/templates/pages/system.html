@@ -7,8 +7,8 @@
   <div>
     <h1 class="h3 mb-1">🔬 Под капотом</h1>
     <p class="text-body-secondary mb-0">Как устроен проект: живая схема сервисов, векторы в Qdrant,
-      очереди Celery и всё остальное. Задайте вопрос или загрузите книгу, и схема покажет,
-      что происходит.</p>
+      очереди Celery и всё остальное. Задайте вопрос, загрузите книгу или запустите
+      <code>make eval</code>, и схема покажет, что происходит.</p>
   </div>
   <a class="small" href="#glossary">Справочник технологий ↓</a>
 </div>
@@ -138,35 +138,58 @@
 </div>
 
 <section class="mt-4">
-  <h2 class="h5">Два главных сценария</h2>
+  <h2 class="h5">Три главных сценария</h2>
   <div class="row g-3">
-    <div class="col-lg-6">
+    <div class="col-xl-4 col-lg-6">
       <div class="card card-body h-100">
         <h3 class="h6">📥 Загрузка книги (ingest, асинхронно)</h3>
         <ol class="small mb-0 flow">
-          <li><span class="t g-client">Браузер</span> HTMX шлёт файл multipart-запросом.</li>
+          <li><span class="t g-client">Браузер</span> или API-клиент шлёт файл: txt, fb2, epub, pdf, docx или zip с ними.</li>
           <li><span class="t g-app">web</span> пишет файл потоком в <span class="t g-store">uploads</span>, считает sha256 (дубликаты не грузим).</li>
           <li><span class="t g-app">web</span> → <span class="t g-store">PostgreSQL</span>: строка documents со статусом queued, COMMIT.</li>
-          <li><b>Только после коммита</b> <span class="t g-app">web</span> кладёт задачу (один ID) в <span class="t g-queue">RabbitMQ</span>. Иначе воркер мог бы взять задачу раньше, чем появится строка в БД.</li>
-          <li><span class="t g-app">worker</span> (Celery) забирает задачу и захватывает документ через <code>UPDATE … WHERE status='queued' RETURNING</code>, поэтому дубль задачи ничего не сломает.</li>
-          <li>Парсинг txt (кодировка, главы) → чанки по ~400 токенов токенизатором bge-m3 → тексты в <span class="t g-store">PostgreSQL</span>.</li>
-          <li>Батчи по 32 текста → <span class="t g-ai">Ollama bge-m3</span> → векторы → upsert в <span class="t g-ai">Qdrant</span>. Id точки — uuid5 от (документ, версия, номер), поэтому повторный прогон перезапишет те же точки.</li>
-          <li>Прогресс → <span class="t g-store">Redis</span>; страница агента опрашивает его каждые 2 с.</li>
-          <li>status=done → книга участвует в поиске.</li>
+          <li><b>Только после коммита</b> задача с одним ID уходит в <span class="t g-queue">RabbitMQ</span>, очередь <code>ingest.parse</code>.</li>
+          <li><span class="t g-app">worker-ingest</span> захватывает документ (<code>UPDATE … WHERE status='queued' RETURNING</code>), парсит формат,
+            чистит текст и режет его <b>структурным чанкером</b>: чанк не пересекает главу, в начале — заголовок «Книга / Часть / Глава».</li>
+          <li>Чанки → <span class="t g-store">PostgreSQL</span>, затем <b>фан-аут</b>: по задаче на батч в очередь <code>ingest.embed</code>.</li>
+          <li><span class="t g-app">worker-embed</span>: батч → <span class="t g-ai">Ollama bge-m3</span> → upsert в <span class="t g-ai">Qdrant</span>
+            (id точки — uuid5, повтор не дублирует). Атомарный +1 к счётчику батчей; последний батч ставит done.</li>
+          <li>Прогресс → <span class="t g-store">Redis</span>, страница агента опрашивает его каждые 2 с.</li>
+          <li><span class="t g-app">beat</span> раз в минуту запускает sweeper: застрявшие документы переотправляются, а упавшие
+            задачи лежат в <code>*.dlq</code> до <code>make dlq-replay</code>.</li>
         </ol>
       </div>
     </div>
-    <div class="col-lg-6">
+    <div class="col-xl-4 col-lg-6">
       <div class="card card-body h-100">
         <h3 class="h6">💬 Вопрос (синхронно, стримом)</h3>
         <ol class="small mb-0 flow">
-          <li><span class="t g-client">Браузер</span> POST вопроса → <span class="t g-app">web</span> сохраняет вопрос и пустой ответ в <span class="t g-store">PostgreSQL</span> и возвращает HTML с <code>sse-connect</code>.</li>
+          <li><span class="t g-client">Браузер</span> POST вопроса → <span class="t g-app">web</span> проверяет rate limit в <span class="t g-store">Redis</span>,
+            сохраняет вопрос и пустой ответ в <span class="t g-store">PostgreSQL</span> и возвращает HTML с <code>sse-connect</code>.</li>
           <li>Браузер открывает <b>SSE-стрим</b>; генерация стартует при подключении.</li>
           <li>Вопрос → <span class="t g-ai">Ollama</span> → вектор из 1024 чисел (★ на карте).</li>
           <li>Вектор → <span class="t g-ai">Qdrant</span>: top-k ближайших чанков <b>только этого агента</b> (фильтр agent_id).</li>
-          <li>Промпт = персона + пронумерованные чанки + вопрос → <span class="t g-ai">DeepSeek</span> со stream=true.</li>
+          <li>Промпт = правила + персона + пронумерованные чанки + вопрос → <span class="t g-ai">DeepSeek</span> со stream=true.</li>
           <li>Токены летят в браузер событиями <code>token</code>, пока LLM ещё пишет.</li>
           <li>Финал: ответ, цитаты и usage → <span class="t g-store">PostgreSQL</span>, событие <code>done</code> приносит итоговый HTML со ссылками [n].</li>
+          <li>Трейс уходит фоном в <span class="t g-ai">Langfuse</span>, счётчики — в <code>/metrics</code>.</li>
+        </ol>
+      </div>
+    </div>
+    <div class="col-xl-4 col-lg-12">
+      <div class="card card-body h-100">
+        <h3 class="h6">🎯 Eval-прогон (<code>make eval</code>, ~25 мин)</h3>
+        <ol class="small mb-0 flow">
+          <li><span class="t g-app">eval</span> — одноразовый контейнер из того же образа: читает golden-датасет
+            (59 вопросов с эталонным ответом и ожидаемыми главами) и создаёт прогон в <span class="t g-store">PostgreSQL</span>.</li>
+          <li>Каждый вопрос идёт через <b>тот же QueryService</b>, что и у пользователя: <span class="t g-ai">Ollama</span> →
+            <span class="t g-ai">Qdrant</span> (20 кандидатов для hit@20) → <span class="t g-ai">DeepSeek</span>. В чат ответ не пишется.</li>
+          <li>Без LLM считаются hit@k, recall@k, MRR (совпала ли глава), верность отказа, валидность цитат, отбита ли инъекция.</li>
+          <li><b>LLM-судья</b> (<span class="t g-ai">DeepSeek</span>, 3 вызова): faithfulness, context precision/recall,
+            answer relevancy, подтверждает ли источник [n].</li>
+          <li>Метрики вопроса → <code>eval_items</code>, score-ы → трейс в <span class="t g-ai">Langfuse</span>,
+            прогон целиком → Langfuse Datasets.</li>
+          <li>Итог — markdown-отчёт и страница <a href="/eval">«Качество»</a>: графики, худшие вопросы, сравнение с прошлым
+            прогоном с 95 % CI (парный bootstrap).</li>
         </ol>
       </div>
     </div>
@@ -193,7 +216,7 @@
     {% endfor %}
   </div>
 
-  <h3 class="h6 mt-4">Библиотеки внутри Python-процессов (web и worker)</h3>
+  <h3 class="h6 mt-4">Библиотеки внутри Python-процессов (web, воркеры, eval)</h3>
   <div class="table-responsive">
     <table class="table table-sm small align-middle">
       <thead><tr><th>Библиотека</th><th>Что делает</th><th>Аналог в Laravel/PHP</th><th>Где</th></tr></thead>

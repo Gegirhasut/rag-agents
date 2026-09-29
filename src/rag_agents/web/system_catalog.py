@@ -28,7 +28,7 @@ NODES: list[Tech] = [
     Tech(
         id="browser",
         title="Браузер",
-        subtitle="Bootstrap 5 · HTMX · SSE",
+        subtitle="HTMX · SSE · или API-клиент",
         group="client",
         what=(
             "Страницы рендерит сервер (Jinja2), а HTMX по атрибутам hx-post/hx-get шлёт запросы "
@@ -40,6 +40,8 @@ NODES: list[Tech] = [
         in_project=[
             "Форма вопроса → POST, ответ — фрагмент с sse-connect",
             "Прогресс загрузки книг — polling фрагмента каждые 2 с",
+            "Вход по паролю (сессия в cookie) или JSON API /api/v1 с ключом Bearer — "
+            "оба канала зовут одни и те же сервисы",
         ],
         code=["web/templates/pages/", "web/templates/fragments/answer_stream.html"],
         x=10,
@@ -63,8 +65,18 @@ NODES: list[Tech] = [
         in_project=[
             "Принимает загрузки и вопросы, стримит ответ по SSE",
             "Считает эмбеддинг вопроса, ищет в Qdrant, зовёт LLM — всё в одном async-потоке",
+            "JSON API /api/v1 (OpenAPI), rate limit на вопросы и загрузки, CSRF для форм",
+            "/metrics — Prometheus: HTTP, стадии RAG, токены и $, глубина очередей; "
+            "метрики воркеров суммируются из общего volume (multiprocess mode)",
         ],
-        code=["web/app.py", "web/routes/", "container.py", "services/query.py"],
+        code=[
+            "web/app.py",
+            "web/routes/",
+            "api/v1/",
+            "container.py",
+            "services/query.py",
+            "core/metrics.py",
+        ],
         x=222,
         y=208,
     ),
@@ -83,9 +95,11 @@ NODES: list[Tech] = [
             "Pydantic-DTO. Alembic ≈ php artisan migrate."
         ),
         in_project=[
-            "Статусы документов (queued → processing → done/failed)",
+            "Статусы документов (queued → parsing → embedding → done/failed) и счётчик батчей",
             "Тексты чанков — чтобы переиндексировать без повторного парсинга",
             "История чата, цитаты и usage (токены, тайминги) ответов",
+            "Пользователи и API-ключи (хранится только sha256 ключа)",
+            "eval_runs / eval_items — прогоны качества: метрики каждого вопроса",
         ],
         code=["models/entities.py", "repositories/", "migrations/", "core/db.py"],
         admin="pgweb",
@@ -105,9 +119,16 @@ NODES: list[Tech] = [
         in_project=[
             "ingest:{document_id} — горячий прогресс индексации (hash, TTL 1 ч)",
             "trace:events — канал pub/sub этой страницы, trace:history — последние события",
-            "Дальше: кэш ответов, сессии, rate limit",
+            "sess:* — сессии входа (TTL продлевается при каждом запросе)",
+            "rate limit: sliding window в ZSET, атомарно Lua-скриптом",
+            "отметка «лимит Langfuse API исчерпан до …», кэш страницы «Аналитика»",
         ],
-        code=["services/progress.py", "services/trace.py"],
+        code=[
+            "services/progress.py",
+            "services/trace.py",
+            "services/sessions.py",
+            "services/ratelimit.py",
+        ],
         admin="redisinsight",
         x=462,
         y=124,
@@ -125,8 +146,9 @@ NODES: list[Tech] = [
         ),
         laravel="Транспорт очереди, как QUEUE_CONNECTION=redis/sqs. Сам ничего не выполняет.",
         in_project=[
-            "Очереди ingest.parse, ingest.embed, maintenance, eval + их *.dlq",
+            "Очереди ingest.parse, ingest.embed, maintenance (+ eval про запас) и их *.dlq",
             "В сообщении только ID документа, никакого текста",
+            "make dlq-replay возвращает сообщения из DLQ в рабочую очередь",
         ],
         code=["workers/celery_app.py", "docker/rabbitmq.conf"],
         admin="rabbitmq",
@@ -143,7 +165,7 @@ NODES: list[Tech] = [
             "(не держит в памяти целиком), воркер читает его при парсинге."
         ),
         laravel="Storage::disk('local').",
-        in_project=["/data/uploads/{agent_id}/{document_id}.txt"],
+        in_project=["/data/uploads/{agent_id}/{document_id}.<txt|fb2|epub|pdf|docx|zip>"],
         code=["core/storage.py"],
         x=462,
         y=404,
@@ -193,6 +215,8 @@ NODES: list[Tech] = [
         laravel="Внешний HTTP API, как платёжный шлюз: ходим через httpx с таймаутами.",
         in_project=[
             "Стрим токенов пробрасывается в браузер без буферизации",
+            "Он же — LLM-судья eval: 3 вызова на вопрос в JSON-режиме, лимит 24 000 токенов "
+            "(рассуждения reasoning-модели длинные)",
             "Позже — fallback-цепочка Claude / OpenAI / Ollama (итерация 7)",
         ],
         code=["llm/openai_compat.py", "rag/prompting/templates/answer_v1.txt"],
@@ -207,8 +231,8 @@ NODES: list[Tech] = [
         what=(
             "Хранит «точки»: id + вектор из 1024 чисел + payload (JSON с текстом и метаданными "
             "чанка). Ищет ближайшие по смыслу векторы (косинусная близость) с фильтром по "
-            "agent_id. Граф HNSW строится внутри каждого агента (payload_m=16), копия векторов "
-            "в int8 держится в RAM, оригиналы float32 лежат на диске."
+            "agent_id. Граф HNSW строится внутри каждого агента (payload_m=16), векторы лежат "
+            "на диске. int8-квантизация выключена: на CPU без AVX Qdrant падал с SIGILL."
         ),
         laravel=(
             "Прямого аналога нет. Ближе всего Scout + Meilisearch, но поиск идёт по смыслу, "
@@ -217,6 +241,7 @@ NODES: list[Tech] = [
         in_project=[
             "Одна коллекция на модель эмбеддингов: chunks__bge_m3_567m__1024",
             "Слот под sparse-вектор BM25 уже есть (гибридный поиск — итерация 5)",
+            "eval достаёт 20 кандидатов (hit@20), в промпт идут top_k из настроек агента",
         ],
         code=["rag/index/qdrant.py"],
         admin="qdrant",
@@ -244,6 +269,55 @@ NODES: list[Tech] = [
         x=900,
         y=282,
     ),
+    Tech(
+        id="eval",
+        title="eval",
+        subtitle="make eval · профиль tools",
+        group="app",
+        what=(
+            "Одноразовый контейнер из того же образа: прогоняет golden-датасет (JSONL с "
+            "эталонными ответами и ожидаемыми главами) через тот же QueryService, что отвечает "
+            "пользователю, только без чата. Считает метрики поиска и отказов, а LLM-судья "
+            "оценивает ответы. Итог — eval_runs/eval_items, markdown-отчёт, Langfuse Datasets "
+            "и страница «Качество»."
+        ),
+        laravel=(
+            "Artisan-команда, которая гоняет feature-тесты на живых данных и пишет отчёт; "
+            "парный bootstrap — как A/B-тест с доверительным интервалом."
+        ),
+        in_project=[
+            "59 вопросов: факты, интерпретация, multi-hop, вне корпуса (нужен отказ), инъекции",
+            "hit@k, recall@k, MRR — по совпадению найденной главы с ожидаемой",
+            "Судья judge_v1: faithfulness, context precision/recall, answer relevancy, "
+            "citation support",
+            "make eval-diff A=… B=… — разница с 95 % CI: «лучше» только если CI не пересекает 0",
+            "Ходит только через services (import-linter), метрики в /metrics не пишет",
+        ],
+        code=["eval/runner.py", "eval/judge.py", "eval/stats.py", "eval/datasets/", "/eval"],
+        x=222,
+        y=404,
+    ),
+    Tech(
+        id="langfuse",
+        title="Langfuse Cloud",
+        subtitle="трейсы · $ · датасеты",
+        group="ai",
+        what=(
+            "Наблюдаемость для LLM: дерево шагов каждого запроса (эмбеддинг, поиск, сборка "
+            "промпта, генерация) с токенами, стоимостью и TTFT. SDK на OpenTelemetry копит "
+            "span-ы в памяти и отправляет фоновым потоком — ответ сеть не ждёт."
+        ),
+        laravel="Telescope/Sentry Performance, только для LLM-вызовов и в облаке.",
+        in_project=[
+            "Трейс на каждый вопрос и индексацию, 👍/👎 → score на трейсе",
+            "eval: трейсы прогона в сессии eval-<run>, метрики вопроса — score-ами, "
+            "прогон целиком — в Langfuse Datasets",
+            "Cloud, а не self-hosted: ClickHouse + MinIO не влезают в 8 ГБ VM",
+        ],
+        code=["core/observability.py", "core/langfuse_api.py"],
+        x=900,
+        y=404,
+    ),
 ]
 
 # Рёбра схемы (без направления: направление задаёт событие src → dst)
@@ -262,6 +336,13 @@ EDGES: list[tuple[str, str]] = [
     ("worker", "redis"),
     ("worker", "qdrant"),
     ("worker", "ollama"),
+    ("web", "langfuse"),
+    ("worker", "langfuse"),
+    ("eval", "postgres"),
+    ("eval", "ollama"),
+    ("eval", "qdrant"),
+    ("eval", "llm"),
+    ("eval", "langfuse"),
 ]
 
 
@@ -317,6 +398,49 @@ LIBS: list[Lib] = [
         "Async HTTP-клиент (Ollama, DeepSeek, RabbitMQ API).",
         "Http-фасад (Guzzle)",
         "rag/embeddings, llm/",
+    ),
+    Lib(
+        "lxml · selectolax",
+        "Разбор XML/HTML: fb2 и главы epub (OPF/NAV читаем сами, без AGPL-ebooklib).",
+        "DOMDocument / Symfony DomCrawler",
+        "rag/parsing/fb2.py, epub.py",
+    ),
+    Lib(
+        "PyMuPDF · python-docx",
+        "Текст PDF по страницам (колонтитулы, переносы) и абзацы docx со стилями заголовков. "
+        "PyMuPDF — AGPL: допустимо для открытого pet-проекта, запасной вариант pypdfium2.",
+        "smalot/pdfparser, PhpWord",
+        "rag/parsing/pdf.py, docx.py",
+    ),
+    Lib(
+        "razdel",
+        "Деление русского текста на предложения: чанкер не режет посреди фразы.",
+        "—",
+        "rag/chunking/",
+    ),
+    Lib(
+        "numpy",
+        "Векторная математика: PCA карты векторов и парный bootstrap eval (10 000 ресэмплов).",
+        "—",
+        "services/system.py, eval/stats.py",
+    ),
+    Lib(
+        "prometheus_client",
+        "Счётчики и гистограммы /metrics; multiprocess mode суммирует web и воркеры.",
+        "promphp/prometheus_client_php",
+        "core/metrics.py",
+    ),
+    Lib(
+        "langfuse",
+        "SDK трейсов на OpenTelemetry: span-ы копятся и уходят фоновым потоком.",
+        "Sentry SDK",
+        "core/observability.py",
+    ),
+    Lib(
+        "typer",
+        "CLI из аннотаций типов: rag-agents user create, dlq replay, python -m rag_agents.eval.",
+        "Artisan-команды",
+        "cli.py, eval/__main__.py",
     ),
     Lib("uv", "Менеджер зависимостей, lock-файл и venv.", "Composer", "pyproject.toml, uv.lock"),
     Lib(

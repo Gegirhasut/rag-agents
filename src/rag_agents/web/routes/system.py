@@ -6,6 +6,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
+from rag_agents.container import Container
+from rag_agents.domain.eval import EvalRunOut
 from rag_agents.domain.system import SystemSnapshot
 from rag_agents.services.errors import NotFoundError
 from rag_agents.web.deps import ContainerDep, OwnerDep, require_admin
@@ -17,7 +19,9 @@ from rag_agents.web.templating import templates
 router = APIRouter(prefix="/system", dependencies=[Depends(require_admin)])
 
 
-def _badges(s: SystemSnapshot) -> dict[str, str]:
+def _badges(
+    s: SystemSnapshot, last_eval: EvalRunOut | None = None, *, tracing: bool = False
+) -> dict[str, str]:
     """Короткие живые подписи под узлами схемы."""
     points = sum(c.points for c in s.qdrant.collections)
     ready = sum(q.ready for q in s.celery.queues if not q.is_dlq)
@@ -50,7 +54,25 @@ def _badges(s: SystemSnapshot) -> dict[str, str]:
             else "недоступна"
         ),
         "llm": s.llm.model + ("" if s.llm.key_configured else " · нет ключа"),
+        "eval": _eval_badge(last_eval),
+        "langfuse": "трейсы уходят фоном" if tracing else "выключен: нет ключей",
     }
+
+
+def _eval_badge(run: EvalRunOut | None) -> str:
+    if run is None:
+        return "прогонов нет · make eval"
+    hit = ((run.metrics or {}).get("metrics", {}).get("hit@8") or {}).get("mean")
+    when = run.started_at.strftime("%d.%m")
+    return f"{run.config_name} {when}" + (f" · hit@8 {hit:.2f}" if hit is not None else "")
+
+
+async def _last_eval(c: Container, owner: UUID) -> EvalRunOut | None:
+    """Последний завершённый прогон по агентам владельца (для подписи узла eval)."""
+    runs = []
+    for a in await c.agents.list(owner):
+        runs += [r for r in await c.evals.owned_runs(owner, a.agent.id, limit=5) if r.finished_at]
+    return max(runs, key=lambda r: r.started_at, default=None)
 
 
 @router.get("", response_class=HTMLResponse)
@@ -81,12 +103,13 @@ async def system_page(
 @router.get("/stats", response_class=HTMLResponse)
 async def system_stats(request: Request, c: ContainerDep, owner: OwnerDep) -> Response:
     snap = await c.system.snapshot(owner)
+    last_eval = await _last_eval(c, owner)
     return templates.TemplateResponse(
         request,
         "fragments/system_stats.html",
         {
             "s": snap,
-            "badges": _badges(snap),
+            "badges": _badges(snap, last_eval, tracing=c.tracer.enabled),
             "host": request.url.hostname,
             "admin_by_key": {u.key: u for u in snap.admin_uis},
         },

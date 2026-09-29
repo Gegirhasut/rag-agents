@@ -80,3 +80,23 @@ class EvalService:
     async def list_runs(self, agent_id: UUID, limit: int = 20) -> list[EvalRunOut]:
         async with self.db.session() as s:
             return await EvalRepository(s).list_runs(agent_id, limit)
+
+    async def owned_runs(self, owner_id: UUID, agent_id: UUID, limit: int = 30) -> list[EvalRunOut]:
+        """Прогоны агента для страницы «Качество»: чужой агент → NotFoundError (404)."""
+        async with self.db.session() as s:
+            if await AgentRepository(s).get(owner_id, agent_id) is None:
+                raise NotFoundError("agent")
+            return await EvalRepository(s).list_runs(agent_id, limit)
+
+    async def owned_run(
+        self, owner_id: UUID, agent_id: UUID, run_id: UUID
+    ) -> tuple[EvalRunOut, list[EvalItemResult]]:
+        """Прогон с вопросами; прогон другого агента (даже своего владельца) → NotFoundError."""
+        async with self.db.session() as s:
+            if await AgentRepository(s).get(owner_id, agent_id) is None:
+                raise NotFoundError("agent")
+            repo = EvalRepository(s)
+            run = await repo.get_run(agent_id, run_id)
+            if run is None:
+                raise NotFoundError("eval_run")
+            return run, await repo.items(agent_id, run_id)
