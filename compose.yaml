@@ -44,7 +44,7 @@ x-app: &app
   volumes:
     - uploads:/data/uploads
     - metrics:/data/metrics
-  restart: unless-stopped
+  restart: on-failure
 
 services:
   postgres:
@@ -65,7 +65,7 @@ services:
       retries: 20
     mem_limit: 512m
     cpus: 1.0
-    restart: unless-stopped
+    restart: on-failure
 
   redis:
     image: redis:7.4.11-alpine
@@ -82,7 +82,7 @@ services:
       retries: 20
     mem_limit: 192m
     cpus: 0.25
-    restart: unless-stopped
+    restart: on-failure
 
   rabbitmq:
     image: rabbitmq:3.13.7-management-alpine
@@ -105,7 +105,7 @@ services:
       start_period: 30s
     mem_limit: 384m
     cpus: 0.5
-    restart: unless-stopped
+    restart: on-failure
 
   qdrant:
     image: qdrant/qdrant:v1.19.1
@@ -125,7 +125,7 @@ services:
       retries: 20
     mem_limit: 640m
     cpus: 1.0
-    restart: unless-stopped
+    restart: on-failure
 
   ollama:
     image: ollama/ollama:0.34.4
@@ -145,7 +145,7 @@ services:
       retries: 20
     mem_limit: 2560m
     cpus: 3.0
-    restart: unless-stopped
+    restart: on-failure
 
   ollama-pull:
     image: ollama/ollama:0.34.4
@@ -306,7 +306,7 @@ services:
         condition: service_healthy
     mem_limit: 128m
     cpus: 0.25
-    restart: unless-stopped
+    restart: on-failure
 
   pgweb:
     image: sosedoff/pgweb:0.16.2
@@ -322,7 +322,7 @@ services:
         condition: service_healthy
     mem_limit: 64m
     cpus: 0.25
-    restart: unless-stopped
+    restart: on-failure
 
   redisinsight:
     image: redis/redisinsight:2.70.1
@@ -341,7 +341,7 @@ services:
         condition: service_healthy
     mem_limit: 256m
     cpus: 0.5
-    restart: unless-stopped
+    restart: on-failure
 
 volumes:
   metrics:

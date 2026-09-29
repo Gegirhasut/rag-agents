@@ -1316,6 +1316,7 @@ Docker обходит ufw, поэтому всё служебное публик
 ### 13.3 Compose-профили
 - по умолчанию: `web, worker-ingest, worker-embed, beat, reranker, ollama, postgres, redis, rabbitmq, qdrant`;
 - `debug`: `flower`, `pgweb`, `redisinsight` (`make up-debug`; ссылки на них — на странице `/system`);
+- Политика перезапуска — `restart: on-failure`, а не `unless-stopped`: Docker поднимает упавший контейнер, но при старте VM стенд сам не запускается. На VM живут и другие проекты, поэтому стенд поднимается только вручную (`make up`).
 - `observability`: `langfuse-web, langfuse-worker, clickhouse, minio` (только 16 ГБ+);
 - `admin` (итерация 10): `streamlit`;
 - `tools` (одноразовые): `reranker-export`, `ollama-pull`.
