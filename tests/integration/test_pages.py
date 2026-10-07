@@ -121,13 +121,18 @@ PAGES = [
 
 @pytest.mark.parametrize("path", PAGES)
 async def test_page_renders_on_real_world_data(
-    browser: Browser, rich_agent: tuple[str, UUID, UUID], path: str
+    browser: Browser, stack: Stack, rich_agent: tuple[str, UUID, UUID], path: str
 ) -> None:
     email, agent_id, doc_id = rich_agent
     b = browser()
     await b.login(email)
     url = path.format(agent=agent_id, doc=doc_id)
     r = await b.http.get(url, headers={"HX-Request": "true"} if "/status" in path else None)
+    if r.status_code == 202 and path.endswith("/vector-map"):
+        # Карту строит воркер: выполняем его задачу и спрашиваем снова, как браузер
+        await stack.container.system.build_vector_map(stack.publisher.vector_maps[-1])
+        r = await b.http.get(url)
+        assert r.json()["agent_id"] == str(agent_id)
     assert r.status_code in (200, 286), f"{url} → {r.status_code}: {r.text[:300]}"
 
 

@@ -11,7 +11,13 @@ from celery import Celery
 from kombu import Exchange, Queue
 
 from rag_agents.core.config import get_settings
-from rag_agents.domain.tasks import DeleteDocumentTask, EmbedBatchTask, ParseTask, PurgeAgentTask
+from rag_agents.domain.tasks import (
+    BuildVectorMapTask,
+    DeleteDocumentTask,
+    EmbedBatchTask,
+    ParseTask,
+    PurgeAgentTask,
+)
 
 TASKS_EXCHANGE = Exchange("tasks", type="direct", durable=True)
 DLX = Exchange("dlx", type="direct", durable=True)
@@ -21,6 +27,7 @@ EMBED_TASK = "rag_agents.ingest.embed"
 DELETE_DOCUMENT_TASK = "rag_agents.maintenance.delete_document"
 PURGE_AGENT_TASK = "rag_agents.maintenance.purge_agent"
 SWEEP_TASK = "rag_agents.maintenance.sweep"
+VECTOR_MAP_TASK = "rag_agents.maintenance.vector_map"
 SWEEP_EVERY_S = 60.0
 REQUEST_ID_HEADER = "request_id"
 
@@ -58,6 +65,7 @@ celery_app.conf.update(
         DELETE_DOCUMENT_TASK: _route("maintenance"),
         PURGE_AGENT_TASK: _route("maintenance"),
         SWEEP_TASK: _route("maintenance"),
+        VECTOR_MAP_TASK: _route("maintenance"),
     },
     beat_schedule={
         # Без expires: Celery делает из него TTL сообщения, и RabbitMQ отправляет истёкший
@@ -122,6 +130,9 @@ class CeleryPublisher:
 
     def publish_purge_agent(self, task: PurgeAgentTask) -> None:
         self._send(PURGE_AGENT_TASK, task.model_dump(mode="json"))
+
+    def publish_build_vector_map(self, task: BuildVectorMapTask) -> None:
+        self._send(VECTOR_MAP_TASK, task.model_dump(mode="json"))
 
 
 def inspect_active(timeout: float = 0.5) -> dict[str, list[dict[str, Any]]]:

@@ -6,7 +6,13 @@ from types import TracebackType
 from typing import Any, Literal, Self, Unpack
 
 from rag_agents.core.observability import ObservationFields, ObservationType, trace_id_for
-from rag_agents.domain.tasks import DeleteDocumentTask, EmbedBatchTask, ParseTask, PurgeAgentTask
+from rag_agents.domain.tasks import (
+    BuildVectorMapTask,
+    DeleteDocumentTask,
+    EmbedBatchTask,
+    ParseTask,
+    PurgeAgentTask,
+)
 from rag_agents.llm.base import LLMChunk, LLMRequest, LLMUsage
 
 VECTOR = [0.5, 0.5, 0.5, 0.5]
@@ -40,6 +46,7 @@ class RecordingPublisher:
     embeds: list[EmbedBatchTask] = field(default_factory=list)
     deletes: list[DeleteDocumentTask] = field(default_factory=list)
     purges: list[PurgeAgentTask] = field(default_factory=list)
+    vector_maps: list[BuildVectorMapTask] = field(default_factory=list)
 
     def publish_parse(self, task: ParseTask) -> None:
         self.tasks.append(task)
@@ -52,6 +59,9 @@ class RecordingPublisher:
 
     def publish_purge_agent(self, task: PurgeAgentTask) -> None:
         self.purges.append(task)
+
+    def publish_build_vector_map(self, task: BuildVectorMapTask) -> None:
+        self.vector_maps.append(task)
 
 
 class WordCounter:

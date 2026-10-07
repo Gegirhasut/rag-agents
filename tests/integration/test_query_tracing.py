@@ -13,6 +13,7 @@ from rag_agents.core.db import Database
 from rag_agents.domain.agents import AgentOut, AgentSettings
 from rag_agents.domain.answers import DoneEvent, StreamEvent
 from rag_agents.domain.documents import ChunkPayload
+from rag_agents.llm.base import LLMChunk, LLMRequest, LLMUsage
 from rag_agents.llm.prices import PriceTable
 from rag_agents.rag.index.qdrant import QdrantChunkIndex, chunk_point_id, collection_name
 from rag_agents.repositories.agents import AgentRepository
@@ -226,3 +227,52 @@ async def test_feedback_stats_for_insights_are_scoped_to_owner(
             zip(trace_ids, [1, 1, -1], strict=True)
         )
         assert await repo.feedback_by_trace(bob.owner_id, trace_ids) == {}
+
+
+class _TruncatingLLM(FakeLLM):
+    """Reasoning-модель, которой не хватило max_tokens: рассуждения съели бюджет ответа."""
+
+    def __init__(self) -> None:
+        self.requests: list[LLMRequest] = []
+
+    async def stream(self, req: LLMRequest) -> AsyncIterator[LLMChunk]:
+        self.requests.append(req)
+        yield LLMChunk(delta="В отношении службы после Ау")
+        usage = LLMUsage(input_tokens=100, output_tokens=req.max_tokens, reasoning_tokens=872)
+        yield LLMChunk(finish_reason="length", usage=usage)
+
+
+async def test_reasoning_does_not_eat_answer_budget_and_truncation_is_flagged(
+    db: Database, qdrant: AsyncQdrantClient, collection_prefix: str, tracer: RecordingTracer
+) -> None:
+    llm = _TruncatingLLM()
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    service = QueryService(
+        db,
+        FakeEmbedder(),
+        QdrantChunkIndex(qdrant),
+        llm,
+        TraceBus(None, enabled=False),  # type: ignore[arg-type]  # Redis не нужен: шина выключена
+        settings,
+        tracer,
+        PriceTable.load(Path("configs/llm_prices.yaml")),
+    )
+    agent = await _agent_with_chunk(db, qdrant, collection_prefix, f"tb-{uuid4().hex[:6]}@t")
+    pair = await service.ask(agent.owner_id, agent.id, None, "Как изменился князь Андрей?")
+    events = await _collect(await service.stream_answer(agent.owner_id, agent.id, pair.answer.id))
+
+    # max_output_tokens агента — бюджет видимого ответа; reasoning получает свой сверху
+    [req] = llm.requests
+    budget = agent.settings.generation.max_output_tokens
+    assert req.max_tokens == budget + settings.llm_reasoning_budget_tokens
+
+    done = events[-1]
+    assert isinstance(done, DoneEvent)
+    assert done.result.usage is not None
+    assert done.result.usage.truncated is True
+    async with db.session() as s:
+        found = await ChatRepository(s).get_message(agent.id, agent.owner_id, pair.answer.id)
+    assert found is not None
+    msg, _ = found
+    assert msg.usage is not None
+    assert msg.usage.truncated is True

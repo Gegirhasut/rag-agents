@@ -1,7 +1,8 @@
 import re
 from uuid import UUID, uuid5
 
-from qdrant_client import AsyncQdrantClient, models
+import anyio
+from qdrant_client import AsyncQdrantClient, QdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
 from rag_agents.core.errors import TransientError
@@ -43,8 +44,17 @@ class QdrantChunkIndex:
     Метода поиска без фильтра агента нет намеренно (ARCHITECTURE §1, §9).
     """
 
-    def __init__(self, client: AsyncQdrantClient, *, quantization: bool = False) -> None:
+    def __init__(
+        self,
+        client: AsyncQdrantClient,
+        *,
+        quantization: bool = False,
+        bulk_client: QdrantClient | None = None,
+    ) -> None:
         self.client = client
+        # Синхронный клиент для тяжёлых выгрузок (scroll_vectors) в отдельном потоке: разбор
+        # мегабайт JSON с векторами в event loop останавливал весь процесс web на десятки секунд
+        self.bulk_client = bulk_client
         # int8-квантизация векторов в RAM. На CPU без AVX Qdrant 1.19 падает с SIGILL,
         # когда строит HNSW по квантизованным векторам — поэтому включается настройкой
         self.quantization = quantization
@@ -193,22 +203,29 @@ class QdrantChunkIndex:
     async def scroll_vectors(
         self, collection: str, agent_id: UUID, limit: int
     ) -> list[tuple[str, list[float], ChunkPayload]]:
-        """Все (до limit) точки агента вместе с dense-векторами — для 2D-карты."""
+        """Все (до limit) точки агента вместе с dense-векторами — для 2D-карты.
+
+        Ответ — ~10 КБ JSON на точку: на тысячах точек разбор занимает секунды CPU, поэтому
+        при наличии bulk_client выгрузка идёт в потоке и не блокирует event loop.
+        """
+        if self.bulk_client is not None:
+            bulk = self.bulk_client
+            return await anyio.to_thread.run_sync(
+                lambda: _scroll_vectors_sync(bulk, collection, agent_id, limit)
+            )
         out: list[tuple[str, list[float], ChunkPayload]] = []
         offset: models.ExtendedPointId | None = None
         while len(out) < limit:
+            # Для карты текст чанка не нужен: payload — только поля подписи точки
             points, offset = await self.client.scroll(
                 collection,
                 scroll_filter=_agent_filter(agent_id),
                 limit=min(256, limit - len(out)),
                 offset=offset,
-                with_payload=True,
+                with_payload=_MAP_PAYLOAD,
                 with_vectors=[DENSE],
             )
-            for p in points:
-                vec = p.vector.get(DENSE) if isinstance(p.vector, dict) else None
-                if isinstance(vec, list) and vec and isinstance(vec[0], float):
-                    out.append((str(p.id), vec, ChunkPayload.model_validate(p.payload)))
+            out.extend(_with_vectors(points))
             if offset is None:
                 break
         return out
@@ -227,3 +244,47 @@ class QdrantChunkIndex:
         if payload.agent_id != str(agent_id) or not isinstance(vec, list):
             return None
         return [float(v) for v in vec if isinstance(v, float)], payload
+
+
+_MAP_PAYLOAD = models.PayloadSelectorInclude(
+    include=[
+        "agent_id",
+        "document_id",
+        "chunk_id",
+        "ord",
+        "book_title",
+        "author",
+        "section_path",
+        "chapter_title",
+    ]
+)
+
+
+def _with_vectors(points: list[models.Record]) -> list[tuple[str, list[float], ChunkPayload]]:
+    out: list[tuple[str, list[float], ChunkPayload]] = []
+    for p in points:
+        vec = p.vector.get(DENSE) if isinstance(p.vector, dict) else None
+        if isinstance(vec, list) and vec and isinstance(vec[0], float):
+            payload = ChunkPayload.model_validate({"text": "", **(p.payload or {})})
+            out.append((str(p.id), vec, payload))
+    return out
+
+
+def _scroll_vectors_sync(
+    client: QdrantClient, collection: str, agent_id: UUID, limit: int
+) -> list[tuple[str, list[float], ChunkPayload]]:
+    out: list[tuple[str, list[float], ChunkPayload]] = []
+    offset: models.ExtendedPointId | None = None
+    while len(out) < limit:
+        points, offset = client.scroll(
+            collection,
+            scroll_filter=_agent_filter(agent_id),
+            limit=min(256, limit - len(out)),
+            offset=offset,
+            with_payload=_MAP_PAYLOAD,
+            with_vectors=[DENSE],
+        )
+        out.extend(_with_vectors(points))
+        if offset is None:
+            break
+    return out

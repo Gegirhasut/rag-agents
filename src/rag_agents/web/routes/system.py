@@ -135,6 +135,8 @@ async def vector_map(agent_id: UUID, c: ContainerDep, owner: OwnerDep) -> Respon
         vmap = await c.system.vector_map(owner, agent_id)
     except NotFoundError as e:
         raise HTTPException(404, "Агент не найден") from e
+    if vmap is None:  # строит воркер; браузер повторит запрос
+        return JSONResponse({"status": "building"}, status_code=202)
     return JSONResponse(vmap.model_dump(mode="json"))
 
 

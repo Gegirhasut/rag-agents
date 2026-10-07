@@ -16,9 +16,11 @@ import httpx
 import numpy as np
 import structlog
 from redis.asyncio import Redis
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_agents.core.config import Settings
 from rag_agents.core.db import Database
+from rag_agents.domain.agents import AgentOut
 from rag_agents.domain.system import (
     AdminUi,
     CeleryStats,
@@ -38,10 +40,12 @@ from rag_agents.domain.system import (
     VectorPoint,
     WorkerTask,
 )
+from rag_agents.domain.tasks import BuildVectorMapTask
 from rag_agents.rag.index.qdrant import QdrantChunkIndex
 from rag_agents.repositories.agents import AgentRepository
 from rag_agents.repositories.system import PgStatsRepository
 from rag_agents.services.errors import NotFoundError
+from rag_agents.services.publisher import TaskPublisher
 
 log = structlog.get_logger()
 
@@ -51,6 +55,25 @@ WorkerInspector = Callable[[], dict[str, list[dict[str, Any]]]]
 _PROBE_TIMEOUT_S = 2.5
 _SNAPSHOT_TIMEOUT_S = 4.0  # на VM под нагрузкой ответы источников гуляют до ~3 с
 _MAP_LIMIT = 5000
+# Карта зависит только от корпуса агента: ключ меняется вместе с corpus_version и числом точек
+_MAP_CACHE_TTL_S = 7 * 24 * 3600
+# Сколько ждать воркер, прежде чем поставить задачу заново (он мог упасть или быть занят книгой)
+_MAP_LOCK_S = 600
+
+
+@dataclass(frozen=True)
+class _MapTarget:
+    agent_id: UUID
+    corpus_version: int
+    total: int  # точек агента в коллекции
+    collection: str
+    dim: int
+
+    @property
+    def redis_key(self) -> str:
+        return f"vmap:{self.agent_id}:{self.corpus_version}:{self.total}:{self.collection}"
+
+
 _REDIS_SAMPLE = 25
 
 
@@ -114,15 +137,19 @@ ADMIN_UIS = (
 
 
 def pca_2d(
-    vectors: np.ndarray, iters: int = 60
+    vectors: np.ndarray, iters: int = 6, oversample: int = 6
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[float]]:
     """PCA на 2 оси: (координаты n×2, среднее, компоненты 2×d, доля дисперсии по осям).
 
     Метод главных компонент находит две оси, вдоль которых векторы «разбросаны» сильнее всего.
     Проекция 1024 → 2 теряет почти всю информацию, но близкие по смыслу чанки остаются рядом.
 
-    Полный SVD на CPU без AVX (наша VM) занимает секунды, поэтому считаем только две нужные
-    компоненты итерациями по подпространству: это одни матричные умножения, O(n·d) за шаг.
+    Полный SVD на CPU без AVX (наша VM) занимает секунды, поэтому считаем только нужные
+    компоненты рандомизированным блочным методом (Halko и др.): ищем сразу 2 + oversample осей.
+    Запас осей нужен потому, что у эмбеддингов первые компоненты почти равны (5.0 % и 4.5 %),
+    и итерации по ровно двум осям сходятся десятками шагов. С запасом хватает нескольких.
+    Итерации — в float32 (вдвое быстрее на CPU без AVX), координаты — в float64 от найденного
+    базиса. На 3 000 × 1024 это ~0.7 с вместо ~8 с у 60 итераций по двум осям.
     """
     x = vectors.astype(np.float64)
     n, d = x.shape
@@ -130,18 +157,24 @@ def pca_2d(
     if n < 2:  # noqa: PLR2004  одной точке нечего раскладывать
         return np.zeros((n, 2)), mean, np.zeros((2, d)), [0.0, 0.0]
     centered = x - mean
-    basis, _ = np.linalg.qr(np.random.default_rng(0).normal(size=(d, 2)))
+    fast = centered.astype(np.float32)
+    k = min(2 + oversample, n, d)
+    probe = np.random.default_rng(0).normal(size=(n, k)).astype(np.float32)
+    basis, _ = np.linalg.qr(fast.T @ probe)
     for _ in range(iters):
-        basis, _ = np.linalg.qr(centered.T @ (centered @ basis))
-    # Rayleigh–Ritz: поворачиваем базис внутри найденной плоскости к собственным векторам
-    coords = centered @ basis
-    w, v = np.linalg.eigh(coords.T @ coords)
-    order = np.argsort(w)[::-1]
-    basis = basis @ v[:, order]
-    coords = centered @ basis
+        basis, _ = np.linalg.qr(fast.T @ (fast @ basis))
+    # Rayleigh–Ritz: внутри найденного подпространства берём две оси с наибольшей дисперсией
+    sub = centered @ basis.astype(np.float64)
+    w, v = np.linalg.eigh(sub.T @ sub)
+    order = np.argsort(w)[::-1][:2]
+    top = basis.astype(np.float64) @ v[:, order]
+    top, _ = np.linalg.qr(top)  # ортонормируем после float32
+    if top.shape[1] < 2:  # noqa: PLR2004  d == 1: второй оси нет
+        top = np.hstack([top, np.zeros((d, 2 - top.shape[1]))])
+    coords = centered @ top
     total = float((centered**2).sum()) or 1.0
     explained = [float(val / total) for val in (coords**2).sum(axis=0)]
-    return coords, mean, basis.T, explained
+    return coords, mean, top.T, explained
 
 
 def _human_bytes(n: float) -> str:
@@ -169,15 +202,17 @@ class SystemService:
         rabbit_http: httpx.AsyncClient,
         inspect_workers: WorkerInspector,
         settings: Settings,
+        publisher: TaskPublisher,
     ) -> None:
         self.db = db
         self.redis = redis
+        self.publisher = publisher
         self.index = index
         self.ollama_http = ollama_http
         self.rabbit_http = rabbit_http
         self.inspect_workers = inspect_workers
         self.settings = settings
-        self._maps: dict[tuple[UUID, int, int], VectorMap] = {}
+        self._maps: dict[UUID, tuple[str, VectorMap]] = {}
         self._probe_http = httpx.AsyncClient(timeout=1.5)
 
     async def aclose(self) -> None:
@@ -414,24 +449,61 @@ class SystemService:
 
         return list(await asyncio.gather(*(probe(s) for s in ADMIN_UIS)))
 
-    async def vector_map(self, owner_id: UUID, agent_id: UUID) -> VectorMap:
-        """2D-карта всех чанков агента (PCA). Кэш — до смены corpus_version агента."""
-        async with self.db.session() as s:
-            repo = AgentRepository(s)
-            agent = await repo.get(owner_id, agent_id)
-            index = (
-                await repo.get_index(agent_id, agent.active_index_id)
-                if agent and agent.active_index_id
-                else None
-            )
-        if agent is None or index is None:
-            raise NotFoundError("agent")
-        total = await self.index.count(index.collection, agent_id)
-        key = (agent_id, agent.corpus_version, total)
-        if key in self._maps:
-            return self._maps[key]
+    async def vector_map(self, owner_id: UUID, agent_id: UUID) -> VectorMap | None:
+        """2D-карта всех чанков агента (PCA) или None, если она ещё строится.
 
-        rows = await self.index.scroll_vectors(index.collection, agent_id, _MAP_LIMIT)
+        Сборка — ~40 МБ JSON с векторами из Qdrant и PCA: в web она на десятки секунд занимала
+        CPU и GIL процесса. Поэтому карту строит воркер (задача maintenance), web отдаёт готовую
+        из Redis — общую для всех процессов и действительную до смены corpus_version агента.
+        """
+        async with self.db.session() as s:
+            agent = await AgentRepository(s).get(owner_id, agent_id)
+            target = await self._map_target(s, agent)
+        if target is None:
+            raise NotFoundError("agent")
+        if (vmap := await self._cached_map(target)) is not None:
+            return vmap
+        # SET NX: из многих запросов задачу ставит один; TTL — на случай упавшего воркера
+        lock = await self.redis.set(f"{target.redis_key}:building", "1", nx=True, ex=_MAP_LOCK_S)
+        if lock:
+            self.publisher.publish_build_vector_map(BuildVectorMapTask(agent_id=agent_id))
+        return None
+
+    async def build_vector_map(self, task: BuildVectorMapTask) -> None:
+        """Воркер: собрать карту агента и положить в Redis. Владелец проверен при постановке."""
+        async with self.db.session() as s:
+            agent = await AgentRepository(s).get_unscoped(task.agent_id)
+            target = await self._map_target(s, agent)
+        if target is None:  # агента удалили, пока задача ждала в очереди
+            return
+        if await self._cached_map(target) is None:
+            vmap = await self._build_map(target)
+            await self.redis.set(target.redis_key, vmap.model_dump_json(), ex=_MAP_CACHE_TTL_S)
+            log.info("system.vector_map_built", agent_id=str(task.agent_id), points=vmap.total)
+        await self.redis.delete(f"{target.redis_key}:building")
+
+    async def _map_target(self, s: AsyncSession, agent: AgentOut | None) -> _MapTarget | None:
+        if agent is None or agent.active_index_id is None:
+            return None
+        index = await AgentRepository(s).get_index(agent.id, agent.active_index_id)
+        if index is None:
+            return None
+        total = await self.index.count(index.collection, agent.id)
+        return _MapTarget(agent.id, agent.corpus_version, total, index.collection, index.dim)
+
+    async def _cached_map(self, target: _MapTarget) -> VectorMap | None:
+        if (vmap := self._maps.get(target.agent_id)) and vmap[0] == target.redis_key:
+            return vmap[1]
+        raw = await self.redis.get(target.redis_key)
+        if raw is None:
+            return None
+        parsed = VectorMap.model_validate_json(raw)
+        # в памяти — только последняя версия карты агента
+        self._maps[target.agent_id] = (target.redis_key, parsed)
+        return parsed
+
+    async def _build_map(self, target: _MapTarget) -> VectorMap:
+        rows = await self.index.scroll_vectors(target.collection, target.agent_id, _MAP_LIMIT)
         rows.sort(key=lambda r: (r[2].document_id, r[2].ord))
         docs: dict[str, VectorMapDoc] = {}
         for _, _, p in rows:
@@ -441,14 +513,13 @@ class SystemService:
             )
             d.points += 1
         doc_idx = {d: i for i, d in enumerate(docs)}
-        matrix = np.array([r[1] for r in rows], dtype=np.float32).reshape(len(rows), index.dim)
-        # CPU-bound: считаем в потоке, чтобы не блокировать event loop web-процесса
+        matrix = np.array([r[1] for r in rows], dtype=np.float32).reshape(len(rows), target.dim)
         coords, mean, comps, explained = await anyio.to_thread.run_sync(pca_2d, matrix)
-        vmap = VectorMap(
-            agent_id=str(agent_id),
-            collection=index.collection,
-            dim=index.dim,
-            total=total,
+        return VectorMap(
+            agent_id=str(target.agent_id),
+            collection=target.collection,
+            dim=target.dim,
+            total=target.total,
             points=[
                 VectorPoint(
                     id=pid,
@@ -465,10 +536,6 @@ class SystemService:
             components=[[round(float(v), 5) for v in c] for c in comps],
             explained=[round(e, 4) for e in explained],
         )
-        self._maps = {k: v for k, v in self._maps.items() if k[0] != agent_id}
-        self._maps[key] = vmap
-        log.info("system.vector_map_built", agent_id=str(agent_id), points=len(rows))
-        return vmap
 
     async def point(self, owner_id: UUID, agent_id: UUID, point_id: UUID) -> PointDetail:
         """Чанк с полным вектором — для «рентгена» точки на карте."""

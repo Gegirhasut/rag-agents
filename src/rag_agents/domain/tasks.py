@@ -33,3 +33,9 @@ class PurgeAgentTask(BaseModel):
     """maintenance: очистить данные мягко удалённого агента."""
 
     agent_id: UUID
+
+
+class BuildVectorMapTask(BaseModel):
+    """maintenance: собрать 2D-карту векторов агента (PCA) в Redis для страницы /system."""
+
+    agent_id: UUID

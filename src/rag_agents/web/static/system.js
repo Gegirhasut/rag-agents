@@ -196,13 +196,20 @@
     }
     query = null; hits = new Map();
     meta.textContent = "строю проекцию…";
-    const resp = await fetch(`/system/agents/${id}/vector-map`);
+    let resp = await fetch(`/system/agents/${id}/vector-map`);
+    // 202: карту строит воркер в фоне (векторы из Qdrant + PCA) — спрашиваем, пока не готова
+    for (let waited = 0; resp.status === 202; waited += 2) {
+      meta.textContent = `строю проекцию в фоне… ${waited} с`;
+      await new Promise((r) => setTimeout(r, 2000));
+      if (select.value !== id) return;  // пользователь уже выбрал другого агента
+      resp = await fetch(`/system/agents/${id}/vector-map`);
+    }
     if (!resp.ok) { meta.textContent = "не удалось загрузить карту"; return; }
     map = await resp.json();
     const ex = map.explained.map((e) => `${(e * 100).toFixed(1)}%`).join(" + ");
     meta.textContent = map.points.length
       ? `${map.points.length} точек · ${map.dim} измерений → 2 · оси PCA объясняют ${ex} разброса`
-      : "у агента ещё нет векторов: загрузите книгу";
+      : "у агента ещё нет векторов: загрузите документ";
     legend.innerHTML = "";
     map.docs.forEach((d, i) => {
       const s = document.createElement("span");

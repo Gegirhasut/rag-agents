@@ -455,7 +455,8 @@ async def test_owner_reaches_same_endpoints(stack: Stack, alice_data: dict[str, 
                 r = await session.http.get(url, headers=session.hx())
             else:
                 r = await stack.client.get(url, headers=bearer)
-            assert r.status_code == 200, f"{url} → {r.status_code}"
+            # 2xx: карта векторов при первом запросе отвечает 202 (её строит воркер)
+            assert r.is_success, f"{url} → {r.status_code}"
     finally:
         await session.aclose()
 

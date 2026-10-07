@@ -30,6 +30,26 @@ def test_pca_keeps_dominant_direction() -> None:
     np.testing.assert_allclose((x[5] - mean) @ comps.T, coords[5], atol=1e-9)
 
 
+def test_pca_matches_exact_svd_when_top_components_are_close() -> None:
+    # Как у эмбеддингов bge-m3: первые две компоненты почти равны (5.0 % и 4.5 %),
+    # на таком спектре итерации ровно по двум осям сходились бы десятками шагов
+    rng = np.random.default_rng(1)
+    n, d = 1500, 256
+    scales = np.linspace(1.0, 0.3, d)
+    scales[:3] = [2.2, 2.1, 1.6]
+    x = rng.normal(size=(n, d)) * scales
+    coords, mean, comps, explained = pca_2d(x)
+
+    centered = x - x.mean(axis=0)
+    _, sv, vt = np.linalg.svd(centered, full_matrices=False)
+    exact = (sv[:2] ** 2) / (sv**2).sum()
+    np.testing.assert_allclose(explained, exact, rtol=1e-3)
+    for i in range(2):
+        assert abs(comps[i] @ vt[i]) > 0.99  # та же ось (с точностью до знака)
+    np.testing.assert_allclose(comps @ comps.T, np.eye(2), atol=1e-9)
+    np.testing.assert_allclose((x - mean) @ comps.T, coords, atol=1e-9)
+
+
 def test_pca_degenerate_inputs() -> None:
     coords, _, comps, explained = pca_2d(np.zeros((1, 4)))
     assert coords.shape == (1, 2)

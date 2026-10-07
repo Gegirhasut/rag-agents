@@ -53,6 +53,8 @@ class AnswerUsage(BaseModel):
     # Стоимость по configs/llm_prices.yaml с учётом тарифа peak/off-peak (None — цены нет)
     cost_usd: float | None = None
     cost_peak: bool | None = None
+    # finish_reason=length: ответ оборван лимитом max_tokens
+    truncated: bool = False
 
 
 class QueryResult(BaseModel):

@@ -25,6 +25,7 @@
 
 {% macro usage_line(u) -%}
 {% if u %}
+{% if u.truncated %}<div class="small text-warning-emphasis mt-2">⚠ Ответ оборван: модель упёрлась в лимит токенов (reasoning {{ u.reasoning_tokens }}). Увеличьте LLM_REASONING_BUDGET_TOKENS или max_output_tokens агента.</div>{% endif %}
 <div class="usage small text-secondary mt-2">
   {% if u.model != 'none' %}{{ u.provider }}/{{ u.model }}{% if u.reasoning_effort %} · effort={{ u.reasoning_effort }}{% endif %}
   · поиск {{ u.t_retrieval_ms }} мс{% if u.t_first_token_ms %} · первый токен {{ u.t_first_token_ms }} мс{% endif %}

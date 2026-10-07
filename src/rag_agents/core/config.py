@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     llm_reasoning_effort: ReasoningEffort | None = "low"
     llm_temperature: float = 0.3
     llm_max_tokens: int = 1200
+    # Reasoning-модели (DeepSeek) считают рассуждения внутри max_tokens: без запаса сверху
+    # длинное рассуждение съедает бюджет ответа и тот обрывается (ARCHITECTURE §12.3).
+    # Оплачиваются только реально потраченные токены, поэтому запас щедрый
+    llm_reasoning_budget_tokens: int = Field(4000, ge=0)
     llm_connect_timeout_s: float = 5.0
     llm_read_timeout_s: float = 60.0
     # Таблица цен LLM (peak/off-peak): cost_usd считаем сами, Langfuse получает готовый cost

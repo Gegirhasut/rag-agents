@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from urllib.parse import unquote, urlsplit
 
 import httpx
-from qdrant_client import AsyncQdrantClient
+from qdrant_client import AsyncQdrantClient, QdrantClient
 from redis.asyncio import Redis
 
 from rag_agents.core.config import Settings
@@ -74,6 +74,8 @@ class Container:
         await self.rabbit_http.aclose()
         await self.ollama_http.aclose()
         await self.qdrant.close()
+        if self.system.index.bulk_client is not None:
+            self.system.index.bulk_client.close()
         await self.redis.aclose()
         await self.db.dispose()
 
@@ -99,7 +101,11 @@ def build_container(
     ollama_http = httpx.AsyncClient(
         base_url=settings.ollama_base_url, timeout=httpx.Timeout(300, connect=5)
     )
-    index = QdrantChunkIndex(qdrant, quantization=settings.qdrant_quantization)
+    index = QdrantChunkIndex(
+        qdrant,
+        quantization=settings.qdrant_quantization,
+        bulk_client=QdrantClient(url=settings.qdrant_url, timeout=120),
+    )
     embedder = OllamaEmbedder(
         ollama_http, settings.embedding_model, settings.embedding_dim, settings.embedding_num_thread
     )
@@ -153,7 +159,9 @@ def build_container(
         documents=DocumentService(db, storage, progress, publisher, trace, settings),
         query=QueryService(db, embedder, index, llm, trace, settings, tracer, prices),
         trace=trace,
-        system=SystemService(db, redis, index, ollama_http, rabbit_http, inspect_active, settings),
+        system=SystemService(
+            db, redis, index, ollama_http, rabbit_http, inspect_active, settings, publisher
+        ),
         tracer=tracer,
         insights=InsightsService(LangfuseReader(settings), redis, db, prices),
         auth=AuthService(db, SessionStore(redis, settings.session_ttl_s)),

@@ -331,6 +331,7 @@ class QueryService:
             generation = self._start_generation(root, request)
             llm_usage = LLMUsage()
             t_first: int | None = None
+            finish: str | None = None
             async for chunk in self.llm.stream(request):
                 if chunk.delta:
                     if t_first is None:
@@ -343,23 +344,21 @@ class QueryService:
                     yield TokenEvent(delta=chunk.delta)
                 if chunk.usage:
                     llm_usage = chunk.usage
+                if chunk.finish_reason:
+                    finish = chunk.finish_reason
 
-            answer = "".join(parts).strip()
-            cost = self.prices.cost(self.llm.name, self.llm.model, llm_usage, datetime.now(UTC))
-            usage = self._answer_usage(
-                llm_usage, cost, (t_embed, t_search, t_retrieval, t_first, _ms(t0))
+            result = await self._complete(
+                agent.id,
+                run,
+                root,
+                generation,
+                request,
+                "".join(parts).strip(),
+                citations,
+                llm_usage,
+                finish,
+                (t_embed, t_search, t_retrieval, t_first, _ms(t0)),
             )
-            result = QueryResult(
-                answer_md=answer,
-                refused=answer.startswith(REFUSAL_TEXT[:40]),
-                citations=citations,
-                usage=usage,
-                trace_id=root.trace_id if self.tracer.enabled else None,
-            )
-            await self._save(message_id, MessageStatus.DONE, result, root.trace_id)
-            self._end_generation(generation, root, result, llm_usage, t_first, cost)
-            self._observe_answer(result, llm_usage, cost, n_sources=len(citations))
-            await self._trace_done(agent.id, run, usage)
             yield DoneEvent(result=result)
         except (LLMError, TransientError, PermanentError) as e:
             yield await self._fail(e, agent.id, run, parts, citations, root, generation)
@@ -377,6 +376,44 @@ class QueryService:
             if generation is not None:
                 generation.end()
             root.end()
+
+    async def _complete(
+        self,
+        agent_id: UUID,
+        run: _AnswerRun,
+        root: Span,
+        generation: Span,
+        request: LLMRequest,
+        answer: str,
+        citations: list[Citation],
+        llm_usage: LLMUsage,
+        finish: str | None,
+        timings: tuple[int, int, int, int | None, int],
+    ) -> QueryResult:
+        """Стрим LLM закончился: стоимость, сохранение, закрытие трейса, метрики."""
+        truncated = finish == "length"
+        if truncated:
+            log.warning(
+                "query.truncated",
+                message_id=str(run.message_id),
+                max_tokens=request.max_tokens,
+                output_tokens=llm_usage.output_tokens,
+                reasoning_tokens=llm_usage.reasoning_tokens,
+            )
+        cost = self.prices.cost(self.llm.name, self.llm.model, llm_usage, datetime.now(UTC))
+        usage = self._answer_usage(llm_usage, cost, timings, truncated)
+        result = QueryResult(
+            answer_md=answer,
+            refused=answer.startswith(REFUSAL_TEXT[:40]),
+            citations=citations,
+            usage=usage,
+            trace_id=root.trace_id if self.tracer.enabled else None,
+        )
+        await self._save(run.message_id, MessageStatus.DONE, result, root.trace_id)
+        self._end_generation(generation, root, result, llm_usage, timings[3], cost)
+        self._observe_answer(result, llm_usage, cost, n_sources=len(citations))
+        await self._trace_done(agent_id, run, usage)
+        return result
 
     def _observe_answer(
         self,
@@ -472,7 +509,8 @@ class QueryService:
             request = LLMRequest(
                 messages=build_messages(persona, question, chunks),
                 temperature=gen.temperature,
-                max_tokens=gen.max_output_tokens,
+                # max_output_tokens — бюджет видимого ответа, рассуждения получают свой сверху
+                max_tokens=gen.max_output_tokens + self.settings.llm_reasoning_budget_tokens,
             )
             span.update(
                 output={
@@ -502,6 +540,7 @@ class QueryService:
         llm_usage: LLMUsage,
         cost: CostBreakdown | None,
         timings: tuple[int, int, int, int | None, int],
+        truncated: bool = False,
     ) -> AnswerUsage:
         """timings: (embed, search, retrieval, first_token, total) в мс."""
         t_embed, t_search, t_retrieval, t_first, t_total = timings
@@ -516,6 +555,7 @@ class QueryService:
             t_total_ms=t_total,
             cost_usd=cost.total if cost else None,
             cost_peak=cost.peak if cost else None,
+            truncated=truncated,
             **llm_usage.model_dump(),
         )
 

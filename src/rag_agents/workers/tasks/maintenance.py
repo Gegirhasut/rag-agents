@@ -1,16 +1,17 @@
-"""Очередь maintenance: удаление документов и агентов, sweeper (beat)."""
+"""Очередь maintenance: удаление документов и агентов, sweeper (beat), карта векторов."""
 
 from typing import Any
 
 import structlog
 
 from rag_agents.core.errors import TransientError
-from rag_agents.domain.tasks import DeleteDocumentTask, PurgeAgentTask
+from rag_agents.domain.tasks import BuildVectorMapTask, DeleteDocumentTask, PurgeAgentTask
 from rag_agents.workers import runtime
 from rag_agents.workers.celery_app import (
     DELETE_DOCUMENT_TASK,
     PURGE_AGENT_TASK,
     SWEEP_TASK,
+    VECTOR_MAP_TASK,
     celery_app,
 )
 from rag_agents.workers.tasks.ingest import MAX_RETRIES, RETRY_BACKOFF, RETRY_BACKOFF_MAX
@@ -47,3 +48,10 @@ def purge_agent(payload: dict[str, Any]) -> None:
 @celery_app.task(name=SWEEP_TASK, autoretry_for=(TransientError,), max_retries=0)
 def sweep() -> None:
     runtime.run(runtime.container().ingest.sweep())
+
+
+# Без ретраев: не собралась — web поставит задачу заново, когда истечёт блокировка (10 мин)
+@celery_app.task(name=VECTOR_MAP_TASK, autoretry_for=(TransientError,), max_retries=0)
+def build_vector_map(payload: dict[str, Any]) -> None:
+    task = BuildVectorMapTask.model_validate(payload)
+    runtime.run(runtime.container().system.build_vector_map(task))

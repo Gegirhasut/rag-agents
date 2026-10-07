@@ -1,6 +1,12 @@
 from typing import Protocol
 
-from rag_agents.domain.tasks import DeleteDocumentTask, EmbedBatchTask, ParseTask, PurgeAgentTask
+from rag_agents.domain.tasks import (
+    BuildVectorMapTask,
+    DeleteDocumentTask,
+    EmbedBatchTask,
+    ParseTask,
+    PurgeAgentTask,
+)
 
 
 class TaskPublisher(Protocol):
@@ -13,3 +19,5 @@ class TaskPublisher(Protocol):
     def publish_delete_document(self, task: DeleteDocumentTask) -> None: ...
 
     def publish_purge_agent(self, task: PurgeAgentTask) -> None: ...
+
+    def publish_build_vector_map(self, task: BuildVectorMapTask) -> None: ...
