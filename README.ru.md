@@ -73,7 +73,7 @@ flowchart LR
     end
     subgraph Query["Ответ (web, async)"]
         A[Вопрос] --> QE[эмбеддинг вопроса] --> S[поиск top-k<br/>в Qdrant по agent_id]
-        S --> C[контекст + промпт answer_v1] --> L[DeepSeek, стриминг]
+        S --> C[контекст + промпт answer_v2] --> L[DeepSeek, стриминг]
         L --> SSE[SSE: sources → tokens → done<br/>со сносками n]
     end
     Q -.-> S

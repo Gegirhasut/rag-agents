@@ -75,7 +75,7 @@ flowchart LR
     end
     subgraph Query["Answer (web, async)"]
         A[Question] --> QE[question embedding] --> S[top-k search<br/>in Qdrant by agent_id]
-        S --> C[context + answer_v1 prompt] --> L[DeepSeek, streaming]
+        S --> C[context + answer_v2 prompt] --> L[DeepSeek, streaming]
         L --> SSE[SSE: sources → tokens → done<br/>with n footnotes]
     end
     Q -.-> S

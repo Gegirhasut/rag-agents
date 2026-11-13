@@ -214,12 +214,13 @@ NODES: list[Tech] = [
         ),
         laravel="Внешний HTTP API, как платёжный шлюз: ходим через httpx с таймаутами.",
         in_project=[
-            "Стрим токенов пробрасывается в браузер без буферизации",
+            "Стрим токенов пробрасывается в браузер без буферизации (придерживается только "
+            "возможное начало служебного маркера отказа)",
             "Он же — LLM-судья eval: 3 вызова на вопрос в JSON-режиме, лимит 24 000 токенов "
             "(рассуждения reasoning-модели длинные)",
             "Позже — fallback-цепочка Claude / OpenAI / Ollama (итерация 7)",
         ],
-        code=["llm/openai_compat.py", "rag/prompting/templates/answer_v1.txt"],
+        code=["llm/openai_compat.py", "rag/prompting/templates/answer_v2.txt"],
         x=900,
         y=6,
     ),

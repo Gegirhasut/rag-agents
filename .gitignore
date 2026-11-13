@@ -16,10 +16,10 @@ htmlcov/
 dist/
 build/
 
-# Runtime data / models
-data/
-uploads/
-models/
+# Runtime data / models (только в корне репозитория: src/rag_agents/models/ — это код)
+/data/
+/uploads/
+/models/
 *.onnx
 
 # IDE / OS
@@ -29,3 +29,8 @@ models/
 
 # Eval: отчёты генерируются; в git — только избранные (git add -f)
 reports/eval/*
+
+# Local AI-assistant notes
+CLAUD?.md
+.claud[e]/
+AGENTS.md

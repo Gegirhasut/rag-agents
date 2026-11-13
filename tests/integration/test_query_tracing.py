@@ -11,11 +11,12 @@ from qdrant_client import AsyncQdrantClient
 from rag_agents.core.config import Settings
 from rag_agents.core.db import Database
 from rag_agents.domain.agents import AgentOut, AgentSettings
-from rag_agents.domain.answers import DoneEvent, StreamEvent
+from rag_agents.domain.answers import DoneEvent, StreamEvent, TokenEvent
 from rag_agents.domain.documents import ChunkPayload
 from rag_agents.llm.base import LLMChunk, LLMRequest, LLMUsage
 from rag_agents.llm.prices import PriceTable
 from rag_agents.rag.index.qdrant import QdrantChunkIndex, chunk_point_id, collection_name
+from rag_agents.rag.prompting.refusal import NO_ANSWER_MARKER
 from rag_agents.repositories.agents import AgentRepository
 from rag_agents.repositories.chats import ChatRepository
 from rag_agents.repositories.users import UserRepository
@@ -276,3 +277,48 @@ async def test_reasoning_does_not_eat_answer_budget_and_truncation_is_flagged(
     msg, _ = found
     assert msg.usage is not None
     assert msg.usage.truncated is True
+
+
+class _SplitMarkerRefusalLLM(FakeLLM):
+    """Отказ, у которого маркер [[NO_ANSWER]] разбит на несколько токенов стрима."""
+
+    async def stream(self, req: LLMRequest) -> AsyncIterator[LLMChunk]:
+        for delta in ("[[", "NO_AN", "SWER]", "] I could", " not find it."):
+            yield LLMChunk(delta=delta)
+        yield LLMChunk(finish_reason="stop", usage=LLMUsage(input_tokens=10, output_tokens=8))
+
+
+async def test_refusal_marker_never_reaches_user_but_sets_refused(
+    db: Database, qdrant: AsyncQdrantClient, collection_prefix: str, tracer: RecordingTracer
+) -> None:
+    service = QueryService(
+        db,
+        FakeEmbedder(),
+        QdrantChunkIndex(qdrant),
+        _SplitMarkerRefusalLLM(),
+        TraceBus(None, enabled=False),  # type: ignore[arg-type]  # Redis не нужен: шина выключена
+        Settings(_env_file=None),  # type: ignore[call-arg]
+        tracer,
+        PriceTable.load(Path("configs/llm_prices.yaml")),
+    )
+    agent = await _agent_with_chunk(db, qdrant, collection_prefix, f"tm-{uuid4().hex[:6]}@t")
+    pair = await service.ask(agent.owner_id, agent.id, None, "What is the pension?")
+    events = await _collect(await service.stream_answer(agent.owner_id, agent.id, pair.answer.id))
+
+    streamed = "".join(ev.delta for ev in events if isinstance(ev, TokenEvent))
+    assert streamed == "I could not find it."
+    done = events[-1]
+    assert isinstance(done, DoneEvent)
+    assert done.result.refused is True
+    assert done.result.answer_md == "I could not find it."
+
+    [root] = tracer.roots()
+    assert root.fields["output"] == "I could not find it."
+    gen = root.children[-1]
+    assert gen.fields["output"].startswith(NO_ANSWER_MARKER)  # сырой ответ LLM — только в трейсе
+
+    async with db.session() as s:
+        found = await ChatRepository(s).get_message(agent.id, agent.owner_id, pair.answer.id)
+    assert found is not None
+    assert found[0].content == "I could not find it."
+    assert found[0].refused is True

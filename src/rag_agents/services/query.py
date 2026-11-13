@@ -37,12 +37,12 @@ from rag_agents.rag.embeddings.ollama import Embedder
 from rag_agents.rag.index.qdrant import QdrantChunkIndex
 from rag_agents.rag.prompting.builder import (
     PROMPT_VERSION,
-    REFUSAL_TEXT,
     AgentPersona,
     build_citations,
     build_messages,
 )
 from rag_agents.rag.prompting.citations import is_grounded
+from rag_agents.rag.prompting.refusal import MarkerFilter, refusal_text
 from rag_agents.repositories.agents import AgentRepository
 from rag_agents.repositories.chats import ChatRepository
 from rag_agents.services.errors import NotFoundError
@@ -60,6 +60,15 @@ class AnswerFailedError(Exception):
 
 def _ms(since: float) -> int:
     return int((time.monotonic() - since) * 1000)
+
+
+def _final_deltas(marker: MarkerFilter, shown: str, question: str) -> list[str]:
+    """Хвост стрима после конца ответа LLM: придержанный фильтром текст, а если модель
+    выдала только маркер отказа — детерминированная фраза отказа на языке вопроса."""
+    tail = marker.flush()
+    if marker.refused and not (shown + tail).strip():
+        return [refusal_text(question)]
+    return [tail] if tail else []
 
 
 @dataclass
@@ -242,16 +251,23 @@ class QueryService:
         )
 
     async def answer(self, owner_id: UUID, agent_id: UUID, message_id: UUID) -> QueryResult:
-        """Ответ без стрима (JSON API): тот же конвейер, события собираются до done."""
+        """Ответ без стрима (JSON API): тот же конвейер, события собираются до done.
+
+        Генератор дочитывается до конца: если бросить его на done, он закроется на yield,
+        и обработчик отмены перезапишет готовое сообщение статусом cancelled.
+        """
+        result: QueryResult | None = None
         async for ev in await self.stream_answer(owner_id, agent_id, message_id):
             match ev:
                 case DoneEvent():
-                    return ev.result
+                    result = ev.result
                 case ErrorEvent():
                     raise AnswerFailedError(ev)
-        raise AnswerFailedError(  # pragma: no cover — генератор всегда завершается done/error
-            ErrorEvent(code="no_result", message="Ответ не получен", retryable=True)
-        )
+        if result is None:  # pragma: no cover — генератор всегда завершается done/error
+            raise AnswerFailedError(
+                ErrorEvent(code="no_result", message="Ответ не получен", retryable=True)
+            )
+        return result
 
     async def _replay(self, msg: MessageOut) -> AsyncIterator[StreamEvent]:
         """Повторное подключение EventSource: генерацию заново не запускаем (ARCHITECTURE §6.3)."""
@@ -321,7 +337,9 @@ class QueryService:
             chunks, t_embed, t_search = await self._retrieve(agent, question, root, run)
 
             if not chunks:
-                yield DoneEvent(result=await self._refuse(agent, run, root, t0, t_embed, t_search))
+                yield DoneEvent(
+                    result=await self._refuse(agent, run, root, question, t0, t_embed, t_search)
+                )
                 return
 
             citations, request = self._build_context(agent, question, chunks, root)
@@ -332,20 +350,23 @@ class QueryService:
             llm_usage = LLMUsage()
             t_first: int | None = None
             finish: str | None = None
+            # Маркер отказа вырезается из стрима; в parts — только то, что видит пользователь
+            marker = MarkerFilter()
             async for chunk in self.llm.stream(request):
                 if chunk.delta:
                     if t_first is None:
-                        t_first = _ms(t0)
-                        metrics.RAG_STAGE_SECONDS.labels("ttft").observe(t_first / 1000)
-                        # Langfuse считает TTFT от старта generation до completion_start_time
-                        generation.update(completion_start_time=datetime.now(UTC))
-                        await self._trace_first_token(agent.id, run, t_first)
-                    parts.append(chunk.delta)
-                    yield TokenEvent(delta=chunk.delta)
+                        t_first = await self._first_token(agent.id, run, generation, t0)
+                    if visible := marker.feed(chunk.delta):
+                        parts.append(visible)
+                        yield TokenEvent(delta=visible)
                 if chunk.usage:
                     llm_usage = chunk.usage
                 if chunk.finish_reason:
                     finish = chunk.finish_reason
+            for visible in _final_deltas(marker, "".join(parts), question):
+                parts.append(visible)
+                yield TokenEvent(delta=visible)
+            answer = "".join(parts).strip()
 
             result = await self._complete(
                 agent.id,
@@ -353,7 +374,9 @@ class QueryService:
                 root,
                 generation,
                 request,
-                "".join(parts).strip(),
+                answer,
+                marker.refused,
+                marker.raw,
                 citations,
                 llm_usage,
                 finish,
@@ -385,12 +408,17 @@ class QueryService:
         generation: Span,
         request: LLMRequest,
         answer: str,
+        refused: bool,
+        raw_output: str,
         citations: list[Citation],
         llm_usage: LLMUsage,
         finish: str | None,
         timings: tuple[int, int, int, int | None, int],
     ) -> QueryResult:
-        """Стрим LLM закончился: стоимость, сохранение, закрытие трейса, метрики."""
+        """Стрим LLM закончился: стоимость, сохранение, закрытие трейса, метрики.
+
+        answer — текст без маркера отказа (его видит пользователь), raw_output — ответ LLM
+        как есть, с маркером: он пишется только в generation-трейс."""
         truncated = finish == "length"
         if truncated:
             log.warning(
@@ -404,13 +432,13 @@ class QueryService:
         usage = self._answer_usage(llm_usage, cost, timings, truncated)
         result = QueryResult(
             answer_md=answer,
-            refused=answer.startswith(REFUSAL_TEXT[:40]),
+            refused=refused,
             citations=citations,
             usage=usage,
             trace_id=root.trace_id if self.tracer.enabled else None,
         )
         await self._save(run.message_id, MessageStatus.DONE, result, root.trace_id)
-        self._end_generation(generation, root, result, llm_usage, timings[3], cost)
+        self._end_generation(generation, root, result, raw_output, llm_usage, timings[3], cost)
         self._observe_answer(result, llm_usage, cost, n_sources=len(citations))
         await self._trace_done(agent_id, run, usage)
         return result
@@ -564,12 +592,13 @@ class QueryService:
         generation: Span,
         root: Span,
         result: QueryResult,
+        raw_output: str,
         llm_usage: LLMUsage,
         t_first: int | None,
         cost: CostBreakdown | None,
     ) -> None:
         fields: ObservationFields = {
-            "output": result.answer_md,
+            "output": raw_output.strip(),
             # reasoning уже входит в output_tokens (DeepSeek), поэтому — только в metadata
             "usage_details": {
                 "input": llm_usage.input_tokens - llm_usage.cached_input_tokens,
@@ -599,11 +628,13 @@ class QueryService:
         agent: AgentOut,
         run: _AnswerRun,
         root: Span,
+        question: str,
         t0: float,
         t_embed: int,
         t_search: int,
     ) -> QueryResult:
-        """Ничего не найдено: отказ без вызова LLM."""
+        """Ничего не найдено: отказ без вызова LLM, на языке вопроса."""
+        text = refusal_text(question)
         t_total = _ms(t0)
         usage = AnswerUsage(
             provider="none",
@@ -616,14 +647,14 @@ class QueryService:
             t_total_ms=t_total,
         )
         result = QueryResult(
-            answer_md=REFUSAL_TEXT,
+            answer_md=text,
             refused=True,
             citations=[],
             usage=usage,
             trace_id=root.trace_id if self.tracer.enabled else None,
         )
         await self._save(run.message_id, MessageStatus.DONE, result, root.trace_id)
-        root.end(output=REFUSAL_TEXT, metadata={"refused": True, "reason": "no_chunks"})
+        root.end(output=text, metadata={"refused": True, "reason": "no_chunks"})
         metrics.RAG_ANSWERS.labels("true", "true", "false", "none", "false").inc()
         metrics.RAG_STAGE_SECONDS.labels("total").observe(t_total / 1000)
         await self._emit(
@@ -666,6 +697,16 @@ class QueryService:
             f"{self.llm.name}/{self.llm.model} (stream=true)",
             agent_id=agent_id,
         )
+
+    async def _first_token(
+        self, agent_id: UUID, run: _AnswerRun, generation: Span, t0: float
+    ) -> int:
+        t_first = _ms(t0)
+        metrics.RAG_STAGE_SECONDS.labels("ttft").observe(t_first / 1000)
+        # Langfuse считает TTFT от старта generation до completion_start_time
+        generation.update(completion_start_time=datetime.now(UTC))
+        await self._trace_first_token(agent_id, run, t_first)
+        return t_first
 
     async def _trace_first_token(self, agent_id: UUID, run: _AnswerRun, t_first: int) -> None:
         await self._emit(

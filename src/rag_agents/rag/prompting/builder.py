@@ -5,8 +5,7 @@ from xml.sax.saxutils import escape, quoteattr
 from rag_agents.domain.answers import Citation, RetrievedChunk
 from rag_agents.llm.base import LLMMessage
 
-PROMPT_VERSION = "answer_v1"
-REFUSAL_TEXT = "В материалах агента я не нашёл ответа на этот вопрос."
+PROMPT_VERSION = "answer_v2"
 _SNIPPET_CHARS = 400
 
 

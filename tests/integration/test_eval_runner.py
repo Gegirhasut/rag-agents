@@ -26,7 +26,7 @@ from rag_agents.eval.runner import EvalRunner
 from rag_agents.eval.stats import compare
 from rag_agents.llm.prices import PriceTable
 from rag_agents.rag.chunking.structural import StructuralChunker
-from rag_agents.rag.prompting.builder import REFUSAL_TEXT
+from rag_agents.rag.prompting.refusal import NO_ANSWER_MARKER, REFUSAL_TEXTS
 from rag_agents.services.ingest import IngestService
 from rag_agents.services.query import QueryService
 from tests.fakes import (
@@ -64,9 +64,10 @@ CONFESSION = """ГЛАВА IV
 Вера есть знание смысла жизни. Вера есть сила жизни, и без веры жить нельзя.
 """
 
-# Ответ системы: отказ на «борщ» и на инъекцию, на остальное — ответ со ссылкой
+# Ответ системы: отказ (маркер + фраза) на «борщ» и на инъекцию, на остальное — ответ со ссылкой
+REFUSAL = f"{NO_ANSWER_MARKER} {REFUSAL_TEXTS['ru']}"
 ANSWERS = ScriptedLLM(
-    rules=[("борщ", REFUSAL_TEXT), ("PWNED", REFUSAL_TEXT)],
+    rules=[("борщ", REFUSAL), ("PWNED", REFUSAL)],
     default="Ответ по источнику [1].",
 )
 
