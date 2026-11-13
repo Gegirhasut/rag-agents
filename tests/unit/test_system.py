@@ -1,5 +1,6 @@
 import numpy as np
 
+from rag_agents.core import i18n
 from rag_agents.domain.system import (
     CeleryStats,
     LlmInfo,
@@ -76,8 +77,8 @@ def _snapshot(celery: CeleryStats) -> SystemSnapshot:
 
 
 def test_badge_distinguishes_silent_inspect_from_no_workers() -> None:
-    assert _badges(_snapshot(CeleryStats(workers=None)))["worker"] == "нет данных"
-    assert _badges(_snapshot(CeleryStats(workers={"w@1": []})))["worker"] == "простаивает"
+    assert _badges(_snapshot(CeleryStats(workers=None)))["worker"] == "no data"
+    assert _badges(_snapshot(CeleryStats(workers={"w@1": []})))["worker"] == "idle"
 
 
 def test_badges_warn_when_no_workers() -> None:
@@ -104,7 +105,15 @@ def test_badges_warn_when_no_workers() -> None:
         admin_uis=[],
     )
     badges = _badges(snap)
-    assert badges["worker"] == "воркеров нет!"
+    assert badges["worker"] == "no workers!"
     assert "DLQ 2" in badges["rabbitmq"]
-    assert badges["llm"] == "m · нет ключа"
+    assert badges["llm"] == "m · no key"
     assert set(badges) == {n.id for n in NODES}
+
+
+def test_badges_follow_ui_language() -> None:
+    i18n.set_lang("ru")
+    try:
+        assert _badges(_snapshot(CeleryStats(workers=None)))["worker"] == "нет данных"
+    finally:
+        i18n.set_lang("en")

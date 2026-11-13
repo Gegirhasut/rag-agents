@@ -6,6 +6,7 @@ from jinja2.utils import htmlsafe_json_dumps
 from markupsafe import Markup
 from pydantic import BaseModel
 
+from rag_agents.core import i18n
 from rag_agents.web.rendering import render_answer
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -17,17 +18,17 @@ def _filesize(n: int) -> str:
     size = float(n)
     for unit in ("Б", "КБ", "МБ"):
         if size < 1024:  # noqa: PLR2004
-            return f"{size:.0f} {unit}" if unit == "Б" else f"{size:.1f} {unit}"
+            return f"{size:.0f} {i18n.t(unit)}" if unit == "Б" else f"{size:.1f} {i18n.t(unit)}"
         size /= 1024
-    return f"{size:.1f} ГБ"
+    return f"{size:.1f} {i18n.t('ГБ')}"
 
 
 def _ms(v: float | None) -> str:
     if v is None:
         return "—"
     if v < 1000:  # noqa: PLR2004  порог перехода мс → с
-        return f"{v:.0f} мс"
-    return f"{v / 1000:.1f} с"
+        return f"{v:.0f} {i18n.t('мс')}"
+    return f"{v / 1000:.1f} {i18n.t('с')}"
 
 
 def _usd(v: float | None) -> str:
@@ -58,3 +59,7 @@ templates.env.filters["usd"] = _usd
 templates.env.filters["num"] = _num
 templates.env.filters["pct"] = _pct
 templates.env.globals["render_answer"] = render_answer
+templates.env.globals["_"] = i18n.t
+templates.env.globals["t"] = i18n.t
+templates.env.globals["get_lang"] = i18n.get_lang
+templates.env.globals["i18n_js"] = i18n.js_catalog

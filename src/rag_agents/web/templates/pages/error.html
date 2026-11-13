@@ -1,5 +1,6 @@
 {% extends "base.html" %}
+{% block title %}{{ status }} · {{ _("RAG-агенты") }}{% endblock %}
 {% block content %}
-<div class="alert alert-danger"><strong>{{ status }}</strong> — {{ detail }}</div>
-<a href="/">← к списку агентов</a>
+<div class="alert alert-danger"><strong>{{ status }}</strong> — {{ _(detail) }}</div>
+<a href="/">← {{ _("к списку агентов") }}</a>
 {% endblock %}

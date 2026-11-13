@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_agents.core.config import Settings
 from rag_agents.core.db import Database
+from rag_agents.core.i18n import t as tr
 from rag_agents.domain.agents import AgentOut
 from rag_agents.domain.system import (
     AdminUi,
@@ -281,7 +282,7 @@ class SystemService:
                     hnsw=f"m={h.m}, payload_m={h.payload_m}, ef_construct={h.ef_construct}",
                     quantization=quant_s,
                     payload_indexes=[
-                        f"{k}: {v.data_type.value} ({v.points} точек)"
+                        f"{k}: {v.data_type.value} (" + tr("{n} точек", n=v.points) + ")"
                         for k, v in info.payload_schema.items()
                     ],
                     per_agent=[p for p in per_agent if p[1]],
@@ -368,7 +369,7 @@ class SystemService:
     async def _redis(self) -> RedisStats:
         info = await self.redis.info()
         keyspace = {
-            k: f"{v.get('keys', 0)} ключей, с TTL {v.get('expires', 0)}"
+            k: tr("{keys} ключей, с TTL {ttl}", keys=v.get("keys", 0), ttl=v.get("expires", 0))
             for k, v in info.items()
             if k.startswith("db") and isinstance(v, dict)
         }
@@ -391,11 +392,11 @@ class SystemService:
     async def _describe_key(self, key: str) -> RedisKey:
         kind = str(await self.redis.type(key))
         ttl = await self.redis.ttl(key)
-        suffix = f" · TTL {ttl} с" if ttl > 0 else ""
+        suffix = " · " + tr("TTL {ttl} с", ttl=ttl) if ttl > 0 else ""
         if kind == "hash":
             value = str(await self.redis.hgetall(key))[:120]
         elif kind == "list":
-            value = f"{await self.redis.llen(key)} элементов"
+            value = tr("{n} элементов", n=await self.redis.llen(key))
         elif kind == "string":
             value = str(await self.redis.get(key))[:80]
         else:

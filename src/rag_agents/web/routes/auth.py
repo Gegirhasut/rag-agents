@@ -7,6 +7,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError as PydanticValidationError
 
+from rag_agents.core.i18n import t
 from rag_agents.domain.auth import ApiKeyCreate, Principal
 from rag_agents.services.auth import InvalidCredentialsError
 from rag_agents.services.ratelimit import Rule
@@ -53,7 +54,7 @@ async def login(
         return templates.TemplateResponse(
             request,
             "pages/login.html",
-            {"next": safe_next(next), "error": "Неверный email или пароль", "email": email},
+            {"next": safe_next(next), "error": t("Неверный email или пароль"), "email": email},
             status_code=401,
         )
     response = RedirectResponse(safe_next(next), status_code=303)
@@ -101,7 +102,7 @@ async def api_key_create(
         data = ApiKeyCreate(name=name)
         issued = await c.auth.issue_key(principal.user_id, data.name)
     except PydanticValidationError:
-        error = "Название ключа — от 1 до 80 символов"
+        error = t("Название ключа — от 1 до 80 символов")
     keys = await c.auth.list_keys(principal.user_id)
     return templates.TemplateResponse(
         request,

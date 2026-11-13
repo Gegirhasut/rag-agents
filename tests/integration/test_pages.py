@@ -143,6 +143,21 @@ async def test_agent_page_shows_old_and_new_usage(
     b = browser()
     await b.login(email)
     html = (await b.http.get(f"/agents/{agent_id}")).text
-    assert "первый токен 2100 мс" in html  # старый формат usage
+    assert "first token 2100 ms" in html  # старый формат usage
     assert "$0.0008" in html  # новый — со стоимостью
-    assert "ответ без вызова LLM" in html  # отказ до LLM
+    assert "answered without an LLM call" in html  # отказ до LLM
+
+
+async def test_agent_page_in_russian_after_switch(
+    browser: Browser, rich_agent: tuple[str, UUID, UUID]
+) -> None:
+    email, agent_id, _ = rich_agent
+    b = browser()
+    await b.login(email)
+    r = await b.http.get("/lang/ru", params={"next": f"/agents/{agent_id}"})
+    assert r.status_code == 303
+    b.http.cookies.set("lang", "ru")
+    html = (await b.http.get(f"/agents/{agent_id}")).text
+    assert '<html lang="ru">' in html
+    assert "первый токен 2100 мс" in html
+    assert "ответ без вызова LLM" in html

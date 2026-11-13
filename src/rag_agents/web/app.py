@@ -13,7 +13,17 @@ from rag_agents.core.config import Settings, get_settings
 from rag_agents.core.logging import configure_logging
 from rag_agents.web.errors import install_error_handlers
 from rag_agents.web.middleware import RequestContextMiddleware
-from rag_agents.web.routes import auth, chat, documents, health, insights, pages, quality, system
+from rag_agents.web.routes import (
+    auth,
+    chat,
+    documents,
+    health,
+    insights,
+    lang,
+    pages,
+    quality,
+    system,
+)
 from rag_agents.web.templating import templates
 
 log = structlog.get_logger()
@@ -62,6 +72,7 @@ def create_app(container_factory: ContainerFactory = build_container) -> FastAPI
     for web_router in (
         health.router,
         auth.router,
+        lang.router,
         pages.router,
         documents.router,
         chat.router,

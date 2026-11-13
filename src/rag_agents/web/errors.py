@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from markupsafe import escape
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from rag_agents.core.i18n import t
 from rag_agents.services.errors import ConflictError, NotFoundError, ValidationError
 from rag_agents.services.ratelimit import RateLimitedError
 from rag_agents.web.deps import NotAuthenticatedError
@@ -59,6 +60,7 @@ def problem(
 def _html_error(
     request: Request, status: int, detail: str, headers: dict[str, str] | None = None
 ) -> Response:
+    detail = t(detail)
     if request.headers.get("HX-Request"):
         return HTMLResponse(
             f'<div class="alert alert-danger py-2 my-2">{escape(detail)}</div>',
@@ -72,6 +74,12 @@ def _html_error(
         status_code=status,
         headers=headers,
     )
+
+
+def localized(exc: ValidationError) -> str:
+    """Текст ValidationError на языке UI: шаблон и строковые параметры через каталог."""
+    params = {k: t(v) if isinstance(v, str) else v for k, v in exc.params.items()}
+    return t(exc.template, **params)
 
 
 def _error(
@@ -134,12 +142,19 @@ def install_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(ValidationError)
     async def invalid(request: Request, exc: ValidationError) -> Response:
-        return _error(request, 422, str(exc))
+        if is_api(request):
+            return problem(422, str(exc))
+        return _html_error(request, 422, localized(exc))
 
     @app.exception_handler(RateLimitedError)
     async def rate_limited(request: Request, exc: RateLimitedError) -> Response:
         headers = {"Retry-After": str(exc.retry_after_s)}
-        detail = f"Слишком много запросов. Повторите через {exc.retry_after_s} с."
+        detail = "Слишком много запросов. Повторите через {s} с."
         if is_api(request):
-            return problem(429, detail, headers=headers, retry_after=exc.retry_after_s)
-        return _html_error(request, 429, detail, headers)
+            return problem(
+                429,
+                detail.format(s=exc.retry_after_s),
+                headers=headers,
+                retry_after=exc.retry_after_s,
+            )
+        return _html_error(request, 429, t(detail, s=exc.retry_after_s), headers)

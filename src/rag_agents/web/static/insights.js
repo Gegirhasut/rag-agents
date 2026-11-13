@@ -1,5 +1,7 @@
 // Страница «Аналитика»: локальное время, раскрытие трейсов, график (Chart.js с CDN).
 (function () {
+  const tr = (s, v) => (window.t ? window.t(s, v) : s);
+  const locale = window.LANG === "ru" ? "ru-RU" : "en-GB";
   const fmt = {
     time: { hour: "2-digit", minute: "2-digit", second: "2-digit" },
     datetime: { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" },
@@ -8,7 +10,7 @@
   function localTimes(root) {
     root.querySelectorAll("time[data-fmt]").forEach((el) => {
       const d = new Date(el.getAttribute("datetime"));
-      if (!isNaN(d)) el.textContent = d.toLocaleString("ru-RU", fmt[el.dataset.fmt] || fmt.datetime);
+      if (!isNaN(d)) el.textContent = d.toLocaleString(locale, fmt[el.dataset.fmt] || fmt.datetime);
     });
   }
 
@@ -22,16 +24,16 @@
     const grid = css.getPropertyValue("--bs-border-color-translucent") || "rgba(0,0,0,.1)";
     const text = css.getPropertyValue("--bs-secondary-color") || "#6c757d";
     const hourly = rows.length > 1 && new Date(rows[1].ts) - new Date(rows[0].ts) < 86400000;
-    const label = (ts) => new Date(ts).toLocaleString("ru-RU",
+    const label = (ts) => new Date(ts).toLocaleString(locale,
       hourly ? { hour: "2-digit", minute: "2-digit" } : { day: "2-digit", month: "2-digit" });
     if (chart) chart.destroy();
     chart = new Chart(canvas, {
       data: {
         labels: rows.map((r) => label(r.ts)),
         datasets: [
-          { type: "bar", label: "Вопросы (вызовы LLM)", data: rows.map((r) => r.questions),
+          { type: "bar", label: tr("Вопросы (вызовы LLM)"), data: rows.map((r) => r.questions),
             backgroundColor: "rgba(79,125,243,.55)", borderRadius: 3, yAxisID: "y" },
-          { type: "line", label: "Стоимость, $", data: rows.map((r) => r.cost_usd),
+          { type: "line", label: tr("Стоимость, $"), data: rows.map((r) => r.cost_usd),
             borderColor: "#19a974", backgroundColor: "#19a974", cubicInterpolationMode: "monotone", pointRadius: 2, yAxisID: "cost" },
         ],
       },
@@ -41,7 +43,7 @@
         plugins: {
           legend: { labels: { color: text, boxWidth: 12 } },
           tooltip: { callbacks: { label: (c) => c.dataset.yAxisID === "cost"
-            ? ` $${Number(c.raw).toFixed(4)}` : ` ${c.raw} вопр.` } },
+            ? ` $${Number(c.raw).toFixed(4)}` : " " + tr("{n} вопр.", { n: c.raw }) } },
         },
         scales: {
           x: { ticks: { color: text, maxRotation: 0, autoSkip: true }, grid: { display: false } },

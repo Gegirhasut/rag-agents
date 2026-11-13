@@ -2,14 +2,14 @@
 {%- if c.author %}{{ c.author }}{% endif -%}
 {%- if c.author and c.book_title %} — {% endif -%}
 {%- if c.book_title %}«{{ c.book_title }}»{% endif -%}
-{%- if not c.author and not c.book_title %}Источник{% endif -%}
-{%- if c.chapter_title %}, гл. {{ c.chapter_title }}{% endif -%}
+{%- if not c.author and not c.book_title %}{{ _("Источник") }}{% endif -%}
+{%- if c.chapter_title %}, {{ _("гл.") }} {{ c.chapter_title }}{% endif -%}
 {%- endmacro %}
 
 {% macro sources(citations, anchor) -%}
 {% if citations %}
 <details class="sources mb-2">
-  <summary class="small text-secondary">Источники ({{ citations|length }})</summary>
+  <summary class="small text-secondary">{{ _("Источники") }} ({{ citations|length }})</summary>
   <ol class="list-unstyled mt-2 mb-0">
   {% for c in citations %}
     <li class="source-card" id="{{ anchor }}-{{ c.n }}">
@@ -25,26 +25,26 @@
 
 {% macro usage_line(u) -%}
 {% if u %}
-{% if u.truncated %}<div class="small text-warning-emphasis mt-2">⚠ Ответ оборван: модель упёрлась в лимит токенов (reasoning {{ u.reasoning_tokens }}). Увеличьте LLM_REASONING_BUDGET_TOKENS или max_output_tokens агента.</div>{% endif %}
+{% if u.truncated %}<div class="small text-warning-emphasis mt-2">⚠ {{ _("Ответ оборван: модель упёрлась в лимит токенов (reasoning {n}). Увеличьте LLM_REASONING_BUDGET_TOKENS или max_output_tokens агента.", n=u.reasoning_tokens) }}</div>{% endif %}
 <div class="usage small text-secondary mt-2">
   {% if u.model != 'none' %}{{ u.provider }}/{{ u.model }}{% if u.reasoning_effort %} · effort={{ u.reasoning_effort }}{% endif %}
-  · поиск {{ u.t_retrieval_ms }} мс{% if u.t_first_token_ms %} · первый токен {{ u.t_first_token_ms }} мс{% endif %}
-  · всего {{ u.t_total_ms }} мс · токены {{ u.input_tokens }}→{{ u.output_tokens }}{% if u.reasoning_tokens %} (reasoning {{ u.reasoning_tokens }}){% endif %}{% if u.cached_input_tokens %} · cache {{ u.cached_input_tokens }}{% endif %}{% if u.cost_usd is not none %} · {{ u.cost_usd|usd }}{% if u.cost_peak == false %} (off-peak){% endif %}{% endif %}
-  {% else %}поиск {{ u.t_retrieval_ms }} мс · ответ без вызова LLM{% endif %}
+  · {{ _("поиск") }} {{ u.t_retrieval_ms }} {{ _("мс") }}{% if u.t_first_token_ms %} · {{ _("первый токен") }} {{ u.t_first_token_ms }} {{ _("мс") }}{% endif %}
+  · {{ _("всего") }} {{ u.t_total_ms }} {{ _("мс") }} · {{ _("токены") }} {{ u.input_tokens }}→{{ u.output_tokens }}{% if u.reasoning_tokens %} (reasoning {{ u.reasoning_tokens }}){% endif %}{% if u.cached_input_tokens %} · cache {{ u.cached_input_tokens }}{% endif %}{% if u.cost_usd is not none %} · {{ u.cost_usd|usd }}{% if u.cost_peak == false %} (off-peak){% endif %}{% endif %}
+  {% else %}{{ _("поиск") }} {{ u.t_retrieval_ms }} {{ _("мс") }} · {{ _("ответ без вызова LLM") }}{% endif %}
 </div>
 {% endif %}
 {%- endmacro %}
 
 {% macro trace_link(trace_id) -%}
-{% if trace_id and insights_enabled %}<a class="small trace-link text-decoration-none" href="/insights/traces/{{ trace_id }}" title="Шаги, тайминги, промпт и стоимость этого ответа">🔎 трейс</a>{% endif %}
+{% if trace_id and insights_enabled %}<a class="small trace-link text-decoration-none" href="/insights/traces/{{ trace_id }}" title="{{ _('Шаги, тайминги, промпт и стоимость этого ответа') }}">🔎 {{ _("трейс") }}</a>{% endif %}
 {%- endmacro %}
 
 {% macro trace_kind(name) -%}
-{% if name == 'query' %}<span class="badge kind kind-query">вопрос</span>
-{% elif name == 'ingest' %}<span class="badge kind kind-ingest">индексация</span>
+{% if name == 'query' %}<span class="badge kind kind-query">{{ _("вопрос") }}</span>
+{% elif name == 'ingest' %}<span class="badge kind kind-ingest">{{ _("индексация") }}</span>
 {% else %}<span class="badge kind">{{ name }}</span>{% endif %}
 {%- endmacro %}
 
 {% macro feedback_badge(v) -%}
-{% if v is none %}<span class="text-body-secondary">·</span>{% elif v %}<span title="👍 полезный ответ">👍</span>{% else %}<span title="👎 плохой ответ">👎</span>{% endif %}
+{% if v is none %}<span class="text-body-secondary">·</span>{% elif v %}<span title="👍 {{ _('полезный ответ') }}">👍</span>{% else %}<span title="👎 {{ _('плохой ответ') }}">👎</span>{% endif %}
 {%- endmacro %}

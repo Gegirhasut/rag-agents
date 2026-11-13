@@ -5,11 +5,13 @@ from uuid import UUID
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, Response
 
+from rag_agents.core.i18n import t
 from rag_agents.domain.documents import DocumentOut
 from rag_agents.services.documents import DOCUMENT_PAGE_SIZE
 from rag_agents.services.errors import NotFoundError, ValidationError
 from rag_agents.services.ratelimit import RateLimitedError, Rule
 from rag_agents.web.deps import ContainerDep, OwnerDep
+from rag_agents.web.errors import localized
 from rag_agents.web.templating import templates
 
 router = APIRouter()
@@ -44,11 +46,17 @@ async def upload_documents(
             await c.rate_limiter.check(rule, str(owner))
             _, created = await c.documents.upload(owner, agent_id, name, _iter_upload(f))
             if not created:
-                notes.append(f"«{name}» уже загружен в этого агента — пропущен")
+                notes.append(t("«{name}» уже загружен в этого агента — пропущен", name=name))
         except ValidationError as e:
-            errors.append(f"«{name}»: {e}")
+            errors.append(f"«{name}»: {localized(e)}")
         except RateLimitedError as e:
-            errors.append(f"«{name}»: лимит загрузок, повторите через {e.retry_after_s} с")
+            errors.append(
+                t(
+                    "«{name}»: лимит загрузок, повторите через {s} с",
+                    name=name,
+                    s=e.retry_after_s,
+                )
+            )
         except NotFoundError as e:
             raise HTTPException(404, "Агент не найден") from e
         finally:

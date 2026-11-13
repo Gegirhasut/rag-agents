@@ -10,6 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
+from rag_agents.core.i18n import t
 from rag_agents.domain.agents import AgentListItem
 from rag_agents.services.errors import NotFoundError
 from rag_agents.web.deps import ContainerDep, OwnerDep
@@ -33,7 +34,7 @@ async def _render(
     run_id: UUID | None,
     base_id: UUID | None,
 ) -> Response:
-    not_found = HTTPException(404, "Не найдено")
+    not_found = HTTPException(404, t("Не найдено"))
     try:
         runs = await c.evals.owned_runs(owner, agent_id)
     except NotFoundError as e:

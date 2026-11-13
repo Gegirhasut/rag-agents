@@ -1,13 +1,16 @@
 {% set principal = request.state.principal if request.state.principal is defined else none %}
 <!doctype html>
-<html lang="ru">
+{% set lang = get_lang() %}
+<html lang="{{ lang }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}RAG-агенты{% endblock %}</title>
+  <title>{% block title %}{{ _("RAG-агенты") }}{% endblock %}</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css">
   <link rel="stylesheet" href="/static/app.css">
   {% if principal and principal.csrf_token %}<meta name="csrf-token" content="{{ principal.csrf_token }}">{% endif %}
+  <script>window.I18N = {{ i18n_js()|tojson }}; window.LANG = "{{ lang }}";
+  window.t = function (s, vars) { var r = window.I18N[s] || s; if (vars) { for (var k in vars) { r = r.split("{" + k + "}").join(vars[k]); } } return r; };</script>
   {% block head %}{% endblock %}
   <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.11/dist/htmx.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/htmx-ext-sse@2.2.4/dist/sse.min.js"></script>
@@ -16,20 +19,22 @@
 <body{% if principal and principal.csrf_token %} hx-headers='{"X-CSRF-Token": "{{ principal.csrf_token }}"}'{% endif %}>
 <nav class="navbar navbar-expand bg-body-tertiary border-bottom mb-4">
   <div class="container">
-    <a class="navbar-brand" href="/">📚 RAG-агенты</a>
-    {% if principal %}
+    <a class="navbar-brand" href="/">📚 {{ _("RAG-агенты") }}</a>
+    {% set here = request.url.path ~ ('?' ~ request.url.query if request.url.query else '') %}
     <div class="d-flex align-items-center gap-3">
-      <a class="nav-link small" href="/insights">📊 Аналитика</a>
-      <a class="nav-link small" href="/eval">🎯 Качество</a>
-      {% if principal.is_admin %}<a class="nav-link small" href="/system">🔬 Под капотом</a>{% endif %}
-      <a class="nav-link small" href="/settings/api-keys">🔑 API-ключи</a>
+      <span class="small lang-switch">{% for code in ("en", "ru") %}{% if not loop.first %} | {% endif %}{% if code == lang %}<strong>{{ code|upper }}</strong>{% else %}<a class="text-decoration-none" href="/lang/{{ code }}?next={{ here|urlencode }}">{{ code|upper }}</a>{% endif %}{% endfor %}</span>
+    {% if principal %}
+      <a class="nav-link small" href="/insights">📊 {{ _("Аналитика") }}</a>
+      <a class="nav-link small" href="/eval">🎯 {{ _("Качество") }}</a>
+      {% if principal.is_admin %}<a class="nav-link small" href="/system">🔬 {{ _("Под капотом") }}</a>{% endif %}
+      <a class="nav-link small" href="/settings/api-keys">🔑 {{ _("API-ключи") }}</a>
       <span class="navbar-text small text-secondary">{{ principal.email }}</span>
       <form method="post" action="/logout" class="m-0">
         <input type="hidden" name="csrf_token" value="{{ principal.csrf_token or '' }}">
-        <button class="btn btn-sm btn-outline-secondary" type="submit">Выйти</button>
+        <button class="btn btn-sm btn-outline-secondary" type="submit">{{ _("Выйти") }}</button>
       </form>
-    </div>
     {% endif %}
+    </div>
   </div>
 </nav>
 <main class="container pb-5">

@@ -3,7 +3,7 @@
      {% if polling %}hx-get="/agents/{{ aid }}/documents/status" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
 {% if docs %}
 <table class="table table-sm align-middle">
-  <thead><tr><th>Файл</th><th class="text-end">Размер</th><th>Статус</th><th></th></tr></thead>
+  <thead><tr><th>{{ _("Файл") }}</th><th class="text-end">{{ _("Размер") }}</th><th>{{ _("Статус") }}</th><th></th></tr></thead>
   <tbody>
   {% for d in docs %}
     <tr id="doc-{{ d.id }}">
@@ -12,12 +12,12 @@
       <td class="doc-status" data-status="{{ d.status.value }}">
         {% if d.status.value == 'done' %}
           <span class="badge text-bg-success">done</span>
-          <div class="small text-secondary">{{ d.chunks_total }} чанков{% if d.duration_s %} · {{ '%.0f'|format(d.duration_s) }} с{% endif %}{% if insights_enabled %} · <a href="/insights/sessions/document-{{ d.id }}" class="text-decoration-none">🔎 трейс</a>{% endif %}</div>
+          <div class="small text-secondary">{{ d.chunks_total }} {{ _("чанков") }}{% if d.duration_s %} · {{ '%.0f'|format(d.duration_s) }} {{ _("с") }}{% endif %}{% if insights_enabled %} · <a href="/insights/sessions/document-{{ d.id }}" class="text-decoration-none">🔎 {{ _("трейс") }}</a>{% endif %}</div>
         {% elif d.status.value == 'failed' %}
           <span class="badge text-bg-danger">failed</span>
-          <div class="small text-danger">{{ d.error_message }} <span class="text-secondary">({{ d.error_code }})</span>{% if insights_enabled %} · <a href="/insights/sessions/document-{{ d.id }}" class="text-decoration-none">🔎 трейс</a>{% endif %}</div>
+          <div class="small text-danger">{{ _(d.error_message) }} <span class="text-secondary">({{ d.error_code }})</span>{% if insights_enabled %} · <a href="/insights/sessions/document-{{ d.id }}" class="text-decoration-none">🔎 {{ _("трейс") }}</a>{% endif %}</div>
         {% elif d.status.value == 'processing' %}
-          <span class="badge text-bg-primary">processing</span> <span class="small">{{ d.stage }}{% if d.batches_total %} · батчей {{ d.batches_done }}/{{ d.batches_total }}{% endif %}</span>
+          <span class="badge text-bg-primary">processing</span> <span class="small">{{ d.stage }}{% if d.batches_total %} · {{ _("батчей") }} {{ d.batches_done }}/{{ d.batches_total }}{% endif %}</span>
           <div class="progress mt-1" role="progressbar" aria-valuenow="{{ d.progress }}" style="height: 6px">
             <div class="progress-bar" style="width: {{ d.progress }}%"></div>
           </div>
@@ -27,13 +27,13 @@
       </td>
       <td class="text-end text-nowrap">
         {% if d.status.value == 'failed' %}
-        <button class="btn btn-sm btn-outline-primary" title="Обработать заново"
+        <button class="btn btn-sm btn-outline-primary" title="{{ _('Обработать заново') }}"
                 hx-post="/agents/{{ aid }}/documents/{{ d.id }}/retry" hx-target="#docs-table" hx-swap="outerHTML">↻</button>
         {% endif %}
         {% if d.status.is_terminal %}
-        <button class="btn btn-sm btn-outline-danger" title="Удалить документ"
+        <button class="btn btn-sm btn-outline-danger" title="{{ _('Удалить документ') }}"
                 hx-delete="/agents/{{ aid }}/documents/{{ d.id }}" hx-target="closest tr" hx-swap="delete"
-                hx-confirm="Удалить «{{ d.title or d.filename }}» и его фрагменты из индекса?">✕</button>
+                hx-confirm="{{ _('Удалить «{name}» и его фрагменты из индекса?', name=d.title or d.filename) }}">✕</button>
         {% endif %}
       </td>
     </tr>
@@ -41,6 +41,6 @@
   </tbody>
 </table>
 {% else %}
-<p class="text-secondary small">Документов пока нет.</p>
+<p class="text-secondary small">{{ _("Документов пока нет.") }}</p>
 {% endif %}
 </div>

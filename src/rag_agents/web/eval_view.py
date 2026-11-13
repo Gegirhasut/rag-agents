@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from rag_agents.core.i18n import t
 from rag_agents.domain.eval import EvalCategory, EvalItemResult, EvalRunOut
 from rag_agents.eval.metrics import quality, worst
 from rag_agents.eval.report import ORDER
@@ -121,7 +122,7 @@ async def build_page(
         page.diff = [
             DiffRow(
                 key=d.metric,
-                label=METRICS[d.metric][0],
+                label=t(METRICS[d.metric][0]),
                 n=d.n,
                 a=d.mean_a,
                 b=d.mean_b,
@@ -155,7 +156,9 @@ def _metric_bars(page: EvalPage) -> list[dict[str, Any]]:
         m = page.metric(key)
         if m is not None:
             label, group = METRICS[key]
-            out.append({"key": key, "label": label, "group": group, "mean": m["mean"], "n": m["n"]})
+            out.append(
+                {"key": key, "label": t(label), "group": group, "mean": m["mean"], "n": m["n"]}
+            )
     return out
 
 
@@ -163,11 +166,11 @@ def _categories(run: EvalRunOut) -> dict[str, Any]:
     by_cat = (run.metrics or {}).get("by_category", {})
     cats = [c for c in EvalCategory if c.value in by_cat]
     return {
-        "labels": [f"{CATEGORY_LABELS[c]} ({by_cat[c.value]['n']})" for c in cats],
+        "labels": [f"{t(CATEGORY_LABELS[c])} ({by_cat[c.value]['n']})" for c in cats],
         "series": [
             {
                 "key": k,
-                "label": METRICS[k][0],
+                "label": t(METRICS[k][0]),
                 "data": [by_cat[c.value].get(k) for c in cats],
             }
             for k in CATEGORY_METRICS
@@ -183,7 +186,7 @@ def _threshold(items: Sequence[EvalItemResult]) -> list[dict[str, Any]]:
             "score": it.scores["max_dense_score"],
             "expects_refusal": it.category.expects_refusal,
             "refused": bool(it.refused),
-            "category": CATEGORY_LABELS[it.category],
+            "category": t(CATEGORY_LABELS[it.category]),
         }
         for it in items
         if it.scores.get("max_dense_score") is not None
@@ -215,7 +218,7 @@ def _trend(run: EvalRunOut, runs: Sequence[EvalRunOut]) -> dict[str, Any]:
             for r in same
         ],
         "series": [
-            {"key": k, "label": METRICS[k][0], "data": [run_headline(r).get(k) for r in same]}
+            {"key": k, "label": t(METRICS[k][0]), "data": [run_headline(r).get(k) for r in same]}
             for k in TREND_METRICS
         ],
     }

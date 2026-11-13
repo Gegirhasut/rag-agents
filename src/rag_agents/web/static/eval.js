@@ -6,7 +6,7 @@
   function localTimes() {
     document.querySelectorAll("time[data-fmt]").forEach((el) => {
       const d = new Date(el.getAttribute("datetime"));
-      if (!isNaN(d)) el.textContent = d.toLocaleString("ru-RU",
+      if (!isNaN(d)) el.textContent = d.toLocaleString(window.LANG === "ru" ? "ru-RU" : "en-GB",
         { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
     });
   }
@@ -80,11 +80,11 @@
     const thr = new Chart(document.getElementById("ch-threshold"), {
       type: "scatter",
       data: { datasets: [
-        { label: "в корпусе: ответ есть", data: pts.filter((p) => !p.expects_refusal).map((p) => ({ x: p.score, y: row(p), p })),
+        { label: window.t("в корпусе: ответ есть"), data: pts.filter((p) => !p.expects_refusal).map((p) => ({ x: p.score, y: row(p), p })),
           backgroundColor: alpha(v("--c-retrieval"), 0.75), pointRadius: 5,
           pointStyle: pts.filter((p) => !p.expects_refusal).map((p) => p.refused ? "crossRot" : "circle"),
           borderColor: v("--c-retrieval") },
-        { label: "вне корпуса / инъекция: нужен отказ", data: pts.filter((p) => p.expects_refusal).map((p) => ({ x: p.score, y: row(p), p })),
+        { label: window.t("вне корпуса / инъекция: нужен отказ"), data: pts.filter((p) => p.expects_refusal).map((p) => ({ x: p.score, y: row(p), p })),
           backgroundColor: alpha(v("--c-refusal"), 0.75), pointRadius: 5,
           pointStyle: pts.filter((p) => p.expects_refusal).map((p) => p.refused ? "circle" : "crossRot"),
           borderColor: v("--c-refusal") },
@@ -92,11 +92,11 @@
       options: {
         maintainAspectRatio: false,
         plugins: { legend: { labels: { boxWidth: 10, usePointStyle: true } },
-          tooltip: { callbacks: { label: (c) => ` ${c.raw.p.id} · ${c.raw.p.category} · score ${c.raw.p.score.toFixed(3)} · ${c.raw.p.refused ? "отказал" : "ответил"}` } } },
+          tooltip: { callbacks: { label: (c) => ` ${c.raw.p.id} · ${c.raw.p.category} · score ${c.raw.p.score.toFixed(3)} · ${c.raw.p.refused ? window.t("отказал") : window.t("ответил")}` } } },
         scales: {
-          x: { title: { display: true, text: "лучший косинусный score найденного чанка" }, grid: { color: grid } },
+          x: { title: { display: true, text: window.t("лучший косинусный score найденного чанка") }, grid: { color: grid } },
           y: { min: -0.5, max: 1.5, grid: { display: false },
-            ticks: { stepSize: 1, callback: (val) => ({ 0: "нет ответа", 1: "есть ответ" })[val] ?? "" } },
+            ticks: { stepSize: 1, callback: (val) => ({ 0: window.t("нет ответа"), 1: window.t("есть ответ") })[val] ?? "" } },
         },
       },
       plugins: [tauLine],
@@ -108,8 +108,8 @@
       const ooc = pts.filter((p) => p.expects_refusal), inc = pts.filter((p) => !p.expects_refusal);
       const caught = ooc.filter((p) => p.score < t).length, lost = inc.filter((p) => p.score < t).length;
       tauStats.innerHTML =
-        `<span class="tau-stat">отказ до LLM для «нет ответа»: <b>${caught} из ${ooc.length}</b></span>` +
-        `<span class="tau-stat text-danger">ложный отказ на вопросах с ответом: <b>${lost} из ${inc.length}</b></span>`;
+        `<span class="tau-stat">${window.t("отказ до LLM для «нет ответа»: <b>{a} из {b}</b>", { a: caught, b: ooc.length })}</span>` +
+        `<span class="tau-stat text-danger">${window.t("ложный отказ на вопросах с ответом: <b>{a} из {b}</b>", { a: lost, b: inc.length })}</span>`;
       thr.update("none");
     }
     tau.addEventListener("input", updateTau);
@@ -120,7 +120,7 @@
     new Chart(document.getElementById("ch-trend"), {
       type: "line",
       data: {
-        labels: trendRuns.map((r) => new Date(r.ts).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })),
+        labels: trendRuns.map((r) => new Date(r.ts).toLocaleString(window.LANG === "ru" ? "ru-RU" : "en-GB", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })),
         datasets: D.trend.series.map((s, i) => ({
           label: s.label, data: s.data, borderColor: SERIES[i % SERIES.length], backgroundColor: SERIES[i % SERIES.length],
           spanGaps: true, tension: 0.25,
@@ -163,8 +163,8 @@
           indexAxis: "y", maintainAspectRatio: false,
           plugins: { legend: { display: false },
             tooltip: { callbacks: { label: (c) => { const d = D.diff[c.dataIndex];
-              return ` Δ ${d.diff >= 0 ? "+" : ""}${d.diff.toFixed(3)}  [${d.lo.toFixed(3)}; ${d.hi.toFixed(3)}] — ${d.verdict}`; } } } },
-          scales: { x: { grid: { color: grid }, title: { display: true, text: "этот − база" } },
+              return ` Δ ${d.diff >= 0 ? "+" : ""}${d.diff.toFixed(3)}  [${d.lo.toFixed(3)}; ${d.hi.toFixed(3)}] — ${window.t(d.verdict)}`; } } } },
+          scales: { x: { grid: { color: grid }, title: { display: true, text: window.t("этот − база") } },
             y: { grid: { display: false }, ticks: { autoSkip: false } } },
         },
         plugins: [zero],
@@ -178,16 +178,16 @@
       data: {
         labels: lat.map((r) => r.id),
         datasets: [
-          { label: "до первого токена", data: lat.map((r) => (r.ttft ?? r.total) / 1000), backgroundColor: v("--c-answer"), stack: "t" },
-          { label: "стрим ответа", data: lat.map((r) => r.ttft == null ? 0 : (r.total - r.ttft) / 1000), backgroundColor: alpha(v("--c-answer"), 0.35), stack: "t" },
+          { label: window.t("до первого токена"), data: lat.map((r) => (r.ttft ?? r.total) / 1000), backgroundColor: v("--c-answer"), stack: "t" },
+          { label: window.t("стрим ответа"), data: lat.map((r) => r.ttft == null ? 0 : (r.total - r.ttft) / 1000), backgroundColor: alpha(v("--c-answer"), 0.35), stack: "t" },
         ],
       },
       options: {
         maintainAspectRatio: false,
         plugins: { legend: { labels: { boxWidth: 12 } },
-          tooltip: { callbacks: { label: (c) => ` ${c.dataset.label}: ${c.raw.toFixed(1)} с` } } },
+          tooltip: { callbacks: { label: (c) => ` ${c.dataset.label}: ${c.raw.toFixed(1)} ${window.t("с")}` } } },
         scales: { x: { stacked: true, ticks: { display: false }, grid: { display: false } },
-          y: { stacked: true, grid: { color: grid }, title: { display: true, text: "секунды" } } },
+          y: { stacked: true, grid: { color: grid }, title: { display: true, text: window.t("секунды") } } },
       },
     });
   }

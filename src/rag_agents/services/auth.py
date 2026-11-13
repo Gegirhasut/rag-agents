@@ -44,7 +44,7 @@ class AuthService:
         async with self.db.uow() as uow:
             repo = UserRepository(uow.session)
             if await repo.get_credentials(email) is not None:
-                raise ValidationError(f"Пользователь {email} уже существует")
+                raise ValidationError("Пользователь {email} уже существует", email=email)
             user = await repo.create(email, hash_password(password), is_admin=is_admin)
             await uow.commit()
         log.info("auth.user_created", user_id=str(user.id), admin=is_admin)

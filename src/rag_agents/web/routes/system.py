@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from rag_agents.container import Container
+from rag_agents.core.i18n import t
 from rag_agents.domain.eval import EvalRunOut
 from rag_agents.domain.system import SystemSnapshot
 from rag_agents.services.errors import NotFoundError
@@ -27,41 +28,42 @@ def _badges(
     ready = sum(q.ready for q in s.celery.queues if not q.is_dlq)
     unacked = sum(q.unacked for q in s.celery.queues)
     dlq = sum(q.ready for q in s.celery.queues if q.is_dlq)
-    active = sum(len(t) for t in (s.celery.workers or {}).values())
+    active = sum(len(tasks) for tasks in (s.celery.workers or {}).values())
     loaded = [m.name for m in s.ollama.models if m.loaded]
     if not s.celery.ok or s.celery.workers is None:
-        worker = "нет данных"
+        worker = t("нет данных")
     elif not s.celery.workers:
-        worker = "воркеров нет!"
+        worker = t("воркеров нет!")
     else:
-        worker = f"занят: {active} задач" if active else "простаивает"
+        worker = t("занят: {n} задач", n=active) if active else t("простаивает")
     return {
-        "browser": "вы здесь",
-        "web": "2 процесса uvicorn",
-        "postgres": s.postgres.db_size or "недоступен",
-        "redis": s.redis.used_memory or "недоступен",
+        "browser": t("вы здесь"),
+        "web": t("2 процесса uvicorn"),
+        "postgres": s.postgres.db_size or t("недоступен"),
+        "redis": s.redis.used_memory or t("недоступен"),
         "rabbitmq": (
-            f"ждут {ready} · в работе {unacked}" + (f" · DLQ {dlq}" if dlq else "")
+            t("ждут {ready} · в работе {unacked}", ready=ready, unacked=unacked)
+            + (f" · DLQ {dlq}" if dlq else "")
             if s.celery.ok
-            else "недоступен"
+            else t("недоступен")
         ),
         "uploads": "docker volume",
         "worker": worker,
-        "qdrant": f"{points} точек" if s.qdrant.ok else "недоступен",
+        "qdrant": t("{n} точек", n=points) if s.qdrant.ok else t("недоступен"),
         "ollama": (
-            ("в памяти: " + ", ".join(loaded) if loaded else "модель выгружена")
+            (t("в памяти: ") + ", ".join(loaded) if loaded else t("модель выгружена"))
             if s.ollama.ok
-            else "недоступна"
+            else t("недоступна")
         ),
-        "llm": s.llm.model + ("" if s.llm.key_configured else " · нет ключа"),
+        "llm": s.llm.model + ("" if s.llm.key_configured else " · " + t("нет ключа")),
         "eval": _eval_badge(last_eval),
-        "langfuse": "трейсы уходят фоном" if tracing else "выключен: нет ключей",
+        "langfuse": t("трейсы уходят фоном") if tracing else t("выключен: нет ключей"),
     }
 
 
 def _eval_badge(run: EvalRunOut | None) -> str:
     if run is None:
-        return "прогонов нет · make eval"
+        return t("прогонов нет · make eval")
     hit = ((run.metrics or {}).get("metrics", {}).get("hit@8") or {}).get("mean")
     when = run.started_at.strftime("%d.%m")
     return f"{run.config_name} {when}" + (f" · hit@8 {hit:.2f}" if hit is not None else "")
@@ -134,7 +136,7 @@ async def vector_map(agent_id: UUID, c: ContainerDep, owner: OwnerDep) -> Respon
     try:
         vmap = await c.system.vector_map(owner, agent_id)
     except NotFoundError as e:
-        raise HTTPException(404, "Агент не найден") from e
+        raise HTTPException(404, t("Агент не найден")) from e
     if vmap is None:  # строит воркер; браузер повторит запрос
         return JSONResponse({"status": "building"}, status_code=202)
     return JSONResponse(vmap.model_dump(mode="json"))
@@ -147,5 +149,5 @@ async def vector_point(
     try:
         detail = await c.system.point(owner, agent_id, point_id)
     except NotFoundError as e:
-        raise HTTPException(404, "Точка не найдена") from e
+        raise HTTPException(404, t("Точка не найдена")) from e
     return JSONResponse(detail.model_dump(mode="json"))

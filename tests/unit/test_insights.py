@@ -239,10 +239,10 @@ async def test_overview_uses_only_own_facts_and_no_langfuse_metrics() -> None:
 async def test_rate_limit_blocks_further_calls_until_reset() -> None:
     reader = FakeReader(rate_limited=True)
     svc = service(reader)
-    with pytest.raises(InsightsUnavailableError, match="Лимит API Langfuse"):
+    with pytest.raises(InsightsUnavailableError, match="Langfuse API rate limit"):
         await svc.trace(OWNER, TRACE)
     assert reader.calls == 1
-    with pytest.raises(InsightsUnavailableError, match="Лимит API Langfuse"):
+    with pytest.raises(InsightsUnavailableError, match="Langfuse API rate limit"):
         await svc.trace(OWNER, TRACE)
     assert reader.calls == 1  # второй раз в Langfuse не пошли
 
@@ -302,7 +302,7 @@ async def test_templates_render_overview_and_trace() -> None:
     html = templates.get_template("fragments/insights_overview.html").render(o=overview)
     assert "Толстой" in html
     assert "series-data" in html
-    assert "до первого токена" in html
+    assert "until first token" in html
     html = templates.get_template("fragments/insights_trace.html").render(t=trace, trace_id=TRACE)
     assert "qdrant_search" in html
     assert "0.610" in html
@@ -312,4 +312,4 @@ async def test_templates_render_overview_and_trace() -> None:
     assert "attempt=3" in pending
     gone = tpl.render(t=None, trace_id=TRACE, attempt=10, give_up=True)
     assert "hx-get" not in gone
-    assert "не найден" in gone
+    assert "not found" in gone

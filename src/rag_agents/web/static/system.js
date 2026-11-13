@@ -5,6 +5,30 @@
   const svg = document.getElementById("arch");
   const NS = "http://www.w3.org/2000/svg";
   const W = cfg.nodeW, H = cfg.nodeH;
+  const tr = window.t || ((x) => x);
+  // Подписи событий приходят с сервера по-русски: переводим по шаблонам каталога ({name} → значение)
+  const PATTERNS = Object.keys(window.I18N || {}).filter((k) => k.includes("{")).map((k) => {
+    const names = [];
+    const src = k.split(/(\{\w+\})/).map((part) => {
+      const m = part.match(/^\{(\w+)\}$/);
+      if (m) { names.push(m[1]); return "(.*?)"; }
+      return part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }).join("");
+    return { re: new RegExp(`^${src}$`), names, key: k };
+  });
+  function trLabel(label) {
+    if (!label || !window.I18N) return label;
+    if (window.I18N[label]) return window.I18N[label];
+    for (const p of PATTERNS) {
+      const m = label.match(p.re);
+      if (m) {
+        const vars = {};
+        p.names.forEach((n, i) => { vars[n] = m[i + 1]; });
+        return tr(p.key, vars);
+      }
+    }
+    return label;
+  }
 
   // ---------- схема ----------
   const nodes = {};
@@ -97,7 +121,7 @@
     setTimeout(drain, fast ? 90 : 750);
   }
   function play(ev, duration) {
-    caption.textContent = ev.label;
+    caption.textContent = trLabel(ev.label);
     if (nodes[ev.src]) flash(nodes[ev.src].g, "active", duration + 300);
     if (ev.dst && nodes[ev.dst]) {
       animateDot(ev, duration);
@@ -114,20 +138,20 @@
   function logEvent(ev, fresh) {
     const li = document.createElement("li");
     li.className = (nodes[ev.src]?.group || "") + (fresh ? " fresh" : "");
-    const time = new Date(ev.ts * 1000).toLocaleTimeString("ru-RU", { hour12: false }) +
+    const time = new Date(ev.ts * 1000).toLocaleTimeString(window.LANG === "ru" ? "ru-RU" : "en-GB", { hour12: false }) +
       "." + String(Math.floor((ev.ts % 1) * 1000)).padStart(3, "0");
     const route = ev.dst ? `${TITLES[ev.src]} → ${TITLES[ev.dst]}` : TITLES[ev.src];
     li.innerHTML = `<div class="d-flex justify-content-between gap-2"><span class="ev-route"></span><span class="ev-time">${time}</span></div>
       <div class="ev-label"></div><div class="ev-kind"></div>`;
     li.querySelector(".ev-route").textContent = route;
-    li.querySelector(".ev-label").textContent = ev.label;
+    li.querySelector(".ev-label").textContent = trLabel(ev.label);
     li.querySelector(".ev-kind").textContent = ev.kind;
     log.prepend(li);
     while (log.children.length > 200) log.lastChild.remove();
   }
   cfg.history.forEach((ev) => logEvent(ev, false));
   if (!cfg.history.length) {
-    log.innerHTML = '<li class="text-body-secondary">Событий пока нет. Задайте вопрос или загрузите книгу.</li>';
+    log.innerHTML = `<li class="text-body-secondary">${tr("Событий пока нет. Задайте вопрос или загрузите книгу.")}</li>`;
   }
 
   // ---------- SSE ----------
@@ -141,7 +165,7 @@
       enqueue(JSON.parse(m.data));
     });
   } else {
-    caption.textContent = "trace_enabled=false: живые события выключены";
+    caption.textContent = tr("trace_enabled=false: живые события выключены");
   }
 
   // ---------- клик по узлу → описание технологии ----------
@@ -152,7 +176,7 @@
     Object.values(nodes).forEach((n) => n.g.classList.toggle("selected", n.g.dataset.node === id));
     info.className = `card mt-3 ${nodes[id].group}`;
     info.innerHTML = card.innerHTML +
-      '<div class="card-footer small"><a href="#glossary">весь справочник ↓</a></div>';
+      `<div class="card-footer small"><a href="#glossary">${tr("весь справочник")} ↓</a></div>`;
     info.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
   Object.entries(nodes).forEach(([id, n]) => {
@@ -191,25 +215,25 @@
     history.replaceState(null, "", `?agent=${id}`);
     if (form) {
       form.setAttribute("hx-post", `/agents/${id}/chats/new/messages`);
-      form.querySelector("input").placeholder = `Вопрос агенту «${name}»`;
+      form.querySelector("input").placeholder = tr("Вопрос агенту «{name}»", { name });
       htmx.process(form);
     }
     query = null; hits = new Map();
-    meta.textContent = "строю проекцию…";
+    meta.textContent = tr("строю проекцию…");
     let resp = await fetch(`/system/agents/${id}/vector-map`);
     // 202: карту строит воркер в фоне (векторы из Qdrant + PCA) — спрашиваем, пока не готова
     for (let waited = 0; resp.status === 202; waited += 2) {
-      meta.textContent = `строю проекцию в фоне… ${waited} с`;
+      meta.textContent = tr("строю проекцию в фоне… {n} с", { n: waited });
       await new Promise((r) => setTimeout(r, 2000));
       if (select.value !== id) return;  // пользователь уже выбрал другого агента
       resp = await fetch(`/system/agents/${id}/vector-map`);
     }
-    if (!resp.ok) { meta.textContent = "не удалось загрузить карту"; return; }
+    if (!resp.ok) { meta.textContent = tr("не удалось загрузить карту"); return; }
     map = await resp.json();
     const ex = map.explained.map((e) => `${(e * 100).toFixed(1)}%`).join(" + ");
     meta.textContent = map.points.length
-      ? `${map.points.length} точек · ${map.dim} измерений → 2 · оси PCA объясняют ${ex} разброса`
-      : "у агента ещё нет векторов: загрузите документ";
+      ? tr("{n} точек · {dim} измерений → 2 · оси PCA объясняют {ex} разброса", { n: map.points.length, dim: map.dim, ex })
+      : tr("у агента ещё нет векторов: загрузите документ");
     legend.innerHTML = "";
     map.docs.forEach((d, i) => {
       const s = document.createElement("span");
@@ -269,7 +293,7 @@
         ctx.fillText(hits.get(s.p.id).score.toFixed(3), s.X + 10, s.Y - 8 + (i % 2) * 4);
       });
       star(QX, QY, 12, 5.5);
-      ctx.fillStyle = "#111"; ctx.font = "600 12px system-ui"; ctx.fillText("вопрос", QX - 22, QY - 16);
+      ctx.fillStyle = "#111"; ctx.font = "600 12px system-ui"; ctx.fillText(tr("вопрос"), QX - 22, QY - 16);
     }
   }
 
@@ -302,7 +326,7 @@
     const hit = hits.get(s.p.id);
     tip.textContent = "";
     const b = document.createElement("b"); b.textContent = doc.title; tip.append(b);
-    tip.append(document.createElement("br"), `${s.p.chapter || "без главы"} · чанк #${s.p.ord}`);
+    tip.append(document.createElement("br"), `${s.p.chapter || tr("без главы")} · ${tr("чанк")} #${s.p.ord}`);
     if (hit) tip.append(document.createElement("br"), `score ${hit.score.toFixed(3)}`);
     tip.style.left = `${Math.min(s.X + 12, canvas.clientWidth - 280)}px`;
     tip.style.top = `${s.Y + 12}px`;
@@ -315,16 +339,16 @@
     const resp = await fetch(`/system/agents/${select.value}/points/${s.p.id}`);
     if (!resp.ok) return;
     const d = await resp.json();
-    renderVector(`${d.book_title || ""} · ${d.chapter_title || "без главы"} · чанк #${d.ord}`, d.vector, d.norm, d.text);
+    renderVector(`${d.book_title || ""} · ${d.chapter_title || tr("без главы")} · ${tr("чанк")} #${d.ord}`, d.vector, d.norm, d.text);
   });
 
   // Вектор целиком: 1024 клетки, синий < 0 < оранжевый (дивергентная шкала)
   function renderVector(title, vec, norm, text) {
     detail.innerHTML = `<div class="fw-semibold mb-1"></div>
       <canvas class="strip" width="${vec.length}" height="1"></canvas>
-      <div class="strip-scale"><span>dim 0</span><span>синий &lt; 0 · серый ≈ 0 · оранжевый &gt; 0</span><span>dim ${vec.length - 1}</span></div>
-      <div class="my-1">длина вектора ‖v‖ = ${norm.toFixed(3)} (нормирован), min ${Math.min(...vec).toFixed(3)}, max ${Math.max(...vec).toFixed(3)}</div>
-      <div class="mb-1 text-body-secondary">первые числа: [${vec.slice(0, 8).map((v) => v.toFixed(3)).join(", ")}, …]</div>`;
+      <div class="strip-scale"><span>dim 0</span><span>${tr("синий &lt; 0 · серый ≈ 0 · оранжевый &gt; 0")}</span><span>dim ${vec.length - 1}</span></div>
+      <div class="my-1">${tr("длина вектора")} ‖v‖ = ${norm.toFixed(3)} (${tr("нормирован")}), min ${Math.min(...vec).toFixed(3)}, max ${Math.max(...vec).toFixed(3)}</div>
+      <div class="mb-1 text-body-secondary">${tr("первые числа:")} [${vec.slice(0, 8).map((v) => v.toFixed(3)).join(", ")}, …]</div>`;
     detail.querySelector(".fw-semibold").textContent = title;
     if (text) {
       const t = document.createElement("div");
@@ -352,7 +376,7 @@
       query = { x, y };
       hits = new Map();
       draw();
-      renderVector("★ вектор вашего вопроса", ev.data.vector, Math.hypot(...ev.data.vector), null);
+      renderVector("★ " + tr("вектор вашего вопроса"), ev.data.vector, Math.hypot(...ev.data.vector), null);
     }
     if (ev.kind === "query.found" && ev.data.hits) {
       hits = new Map(ev.data.hits.map((h) => [h.id, h]));

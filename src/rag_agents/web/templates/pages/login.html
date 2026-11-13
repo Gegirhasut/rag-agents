@@ -1,9 +1,9 @@
 {% extends "base.html" %}
-{% block title %}Вход · RAG-агенты{% endblock %}
+{% block title %}{{ _("Вход") }} · {{ _("RAG-агенты") }}{% endblock %}
 {% block content %}
 <div class="row justify-content-center">
   <div class="col-sm-8 col-md-6 col-lg-4">
-    <h1 class="h4 mb-3">Вход</h1>
+    <h1 class="h4 mb-3">{{ _("Вход") }}</h1>
     {% if error %}<div class="alert alert-danger py-2">{{ error }}</div>{% endif %}
     <form method="post" action="/login">
       <input type="hidden" name="next" value="{{ next }}">
@@ -13,14 +13,14 @@
                autocomplete="username" value="{{ email }}">
       </div>
       <div class="mb-3">
-        <label class="form-label" for="password">Пароль</label>
+        <label class="form-label" for="password">{{ _("Пароль") }}</label>
         <input class="form-control" id="password" name="password" type="password" required
                autocomplete="current-password">
       </div>
-      <button class="btn btn-primary w-100" type="submit">Войти</button>
+      <button class="btn btn-primary w-100" type="submit">{{ _("Войти") }}</button>
     </form>
     <p class="small text-secondary mt-3">
-      Пользователя создаёт администратор: <code>rag-agents user create EMAIL --admin</code>.
+      {{ _("Пользователя создаёт администратор:") }} <code>rag-agents user create EMAIL --admin</code>.
     </p>
   </div>
 </div>

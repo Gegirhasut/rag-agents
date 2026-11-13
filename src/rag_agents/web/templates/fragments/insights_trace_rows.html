@@ -2,9 +2,9 @@
 {% set rows = rows if rows is defined else o.recent %}
 <table class="table table-sm table-hover align-middle mb-0 traces">
   <thead><tr>
-    <th>Время</th><th>Тип</th><th>Агент</th><th>Запрос</th>
-    <th class="text-end">Длительность</th><th class="text-end">1-й токен</th>
-    <th class="text-end">Токены</th><th class="text-end">Стоимость</th><th class="text-center">Оценка</th>
+    <th>{{ _("Время") }}</th><th>{{ _("Тип") }}</th><th>{{ _("Агент") }}</th><th>{{ _("Запрос") }}</th>
+    <th class="text-end">{{ _("Длительность") }}</th><th class="text-end">{{ _("1-й токен") }}</th>
+    <th class="text-end">{{ _("Токены") }}</th><th class="text-end">{{ _("Стоимость") }}</th><th class="text-center">{{ _("Оценка") }}</th>
   </tr></thead>
   <tbody>
   {% for r in rows %}
@@ -16,7 +16,7 @@
       <td class="small text-truncate" style="max-width: 12rem">{{ r.agent or '—' }}</td>
       <td class="text-truncate" style="max-width: 26rem" title="{{ r.title }}">
         <a href="/insights/traces/{{ r.trace_id }}" class="link-body-emphasis text-decoration-none">{{ r.title }}</a>
-        {% if r.level == 'ERROR' %}<div class="small text-danger text-truncate">{{ r.status_message }}</div>{% endif %}
+        {% if r.level == 'ERROR' %}<div class="small text-danger text-truncate">{{ _(r.status_message or "") }}</div>{% endif %}
       </td>
       <td class="text-end text-nowrap">{{ r.latency_ms|ms }}</td>
       <td class="text-end text-nowrap">{{ r.ttft_ms|ms }}</td>
@@ -26,10 +26,10 @@
     </tr>
     <tr id="tx-{{ r.trace_id }}" class="trace-expand d-none"><td colspan="9">
       <div id="txb-{{ r.trace_id }}"><div class="text-body-secondary small p-2">
-        <span class="spinner-border spinner-border-sm me-1"></span> Загружаю трейс…</div></div>
+        <span class="spinner-border spinner-border-sm me-1"></span> {{ _("Загружаю трейс…") }}</div></div>
     </td></tr>
   {% else %}
-    <tr><td colspan="9" class="text-body-secondary small">Трейсов пока нет. Задайте агенту вопрос или загрузите документ.</td></tr>
+    <tr><td colspan="9" class="text-body-secondary small">{{ _("Трейсов пока нет. Задайте агенту вопрос или загрузите документ.") }}</td></tr>
   {% endfor %}
   </tbody>
 </table>

@@ -38,7 +38,7 @@ async def test_login_sets_http_only_cookie_and_logout_ends_session(
     b = browser()
     bad = await b.login(user.email, "wrong-password")
     assert bad.status_code == 401
-    assert "Неверный email или пароль" in bad.text
+    assert "Invalid email or password" in bad.text
 
     r = await b.login(user.email.upper())  # email без учёта регистра (citext)
     assert r.status_code == 303
@@ -195,7 +195,7 @@ async def test_system_page_is_admin_only(stack: Stack, browser: Browser) -> None
     await b.login(user.email)
     await a.login(admin.email)
     assert (await b.http.get("/system")).status_code == 404
-    assert "Под капотом" not in (await b.http.get("/")).text
+    assert "Under the hood" not in (await b.http.get("/")).text
     assert (await a.http.get("/system")).status_code == 200
 
 

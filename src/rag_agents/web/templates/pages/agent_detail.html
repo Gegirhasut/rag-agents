@@ -1,25 +1,25 @@
 {% extends "base.html" %}
 {% from "macros.html" import sources, usage_line, trace_link %}
-{% block title %}{{ agent.name }} — RAG-агенты{% endblock %}
+{% block title %}{{ agent.name }} — {{ _("RAG-агенты") }}{% endblock %}
 {% block content %}
-<a href="/" class="small">← агенты</a>
+<a href="/" class="small">← {{ _("агенты") }}</a>
 <div class="d-flex flex-wrap align-items-baseline gap-3 mt-1">
   <h1 class="h3 mb-2">{{ agent.name }}</h1>
-  <a class="small" href="/system?agent={{ agent.id }}" target="_blank">🔬 смотреть под капотом (откроется рядом)</a>
+  <a class="small" href="/system?agent={{ agent.id }}" target="_blank">🔬 {{ _("смотреть под капотом (откроется рядом)") }}</a>
 </div>
 {% if agent.description %}<p class="text-body-secondary">{{ agent.description }}</p>{% endif %}
 
 <div class="row g-4">
   <section class="col-lg-5">
-    <h2 class="h5">Документы</h2>
+    <h2 class="h5">{{ _("Документы") }}</h2>
     <form hx-post="/agents/{{ agent.id }}/documents" hx-encoding="multipart/form-data"
           hx-target="#docs-panel" hx-swap="innerHTML" hx-disabled-elt="find button"
           hx-on::after-request="if(event.detail.successful) this.reset()" class="mb-3">
       <div class="input-group">
         <input class="form-control" type="file" name="files" accept=".txt,.fb2,.zip,.epub,.pdf,.docx" multiple required>
-        <button class="btn btn-outline-primary" type="submit">Загрузить</button>
+        <button class="btn btn-outline-primary" type="submit">{{ _("Загрузить") }}</button>
       </div>
-      <div class="form-text">.txt (UTF-8, cp1251, koi8-r), .fb2, .fb2.zip, .epub, .pdf (с текстовым слоем), .docx — до 100 МБ.</div>
+      <div class="form-text">{{ _(".txt (UTF-8, cp1251, koi8-r), .fb2, .fb2.zip, .epub, .pdf (с текстовым слоем), .docx — до 100 МБ.") }}</div>
     </form>
     <div id="docs-panel">
       {% include "fragments/documents_panel.html" %}
@@ -28,8 +28,8 @@
 
   <section class="col-lg-7">
     <div class="d-flex justify-content-between align-items-baseline">
-      <h2 class="h5">Вопрос агенту</h2>
-      {% if insights_enabled and messages %}<a class="small" href="/insights/sessions/{{ messages[0].chat_id }}">📊 чат в аналитике</a>{% endif %}
+      <h2 class="h5">{{ _("Вопрос агенту") }}</h2>
+      {% if insights_enabled and messages %}<a class="small" href="/insights/sessions/{{ messages[0].chat_id }}">📊 {{ _("чат в аналитике") }}</a>{% endif %}
     </div>
     <div id="messages" class="messages mb-3">
       {% for m in messages %}
@@ -42,7 +42,7 @@
           <div class="answer card card-body mb-3">
             {{ sources(m.citations, anchor) }}
             <div class="answer-body">{{ render_answer(m.content, anchor, (m.citations or [])|length)|safe }}</div>
-            {% if m.status != 'done' %}<div class="small text-warning">Ответ прерван ({{ m.status }})</div>{% endif %}
+            {% if m.status != 'done' %}<div class="small text-warning">{{ _("Ответ прерван ({status})", status=m.status) }}</div>{% endif %}
             {{ usage_line(m.usage) }}
             <div class="d-flex align-items-center gap-3">
             {% if m.status == 'done' %}
@@ -58,8 +58,8 @@
           hx-on::after-request="if(event.detail.successful) this.reset()">
       <div class="input-group">
         <input class="form-control" name="question" required minlength="2" maxlength="2000"
-               placeholder="В чём смысл жизни?" autocomplete="off">
-        <button class="btn btn-primary" type="submit">Спросить</button>
+               placeholder="{{ _('В чём смысл жизни?') }}" autocomplete="off">
+        <button class="btn btn-primary" type="submit">{{ _("Спросить") }}</button>
       </div>
     </form>
   </section>

@@ -1,25 +1,26 @@
 {% extends "base.html" %}
+{% block title %}{{ _("Новый агент") }} · {{ _("RAG-агенты") }}{% endblock %}
 {% block content %}
-<h1 class="h3 mb-3">Новый агент</h1>
+<h1 class="h3 mb-3">{{ _("Новый агент") }}</h1>
 {% for e in errors %}<div class="alert alert-danger py-2">{{ e }}</div>{% endfor %}
 <form method="post" action="/agents" class="col-lg-8">
   <input type="hidden" name="csrf_token" value="{{ request.state.principal.csrf_token }}">
   <div class="mb-3">
-    <label class="form-label" for="name">Название</label>
+    <label class="form-label" for="name">{{ _("Название") }}</label>
     <input class="form-control" id="name" name="name" required maxlength="120"
-           value="{{ form.name or '' }}" placeholder="Внутренний мир Льва Толстого">
+           value="{{ form.name or '' }}" placeholder="{{ _('Внутренний мир Льва Толстого') }}">
   </div>
   <div class="mb-3">
-    <label class="form-label" for="description">Описание</label>
+    <label class="form-label" for="description">{{ _("Описание") }}</label>
     <textarea class="form-control" id="description" name="description" rows="2" maxlength="2000">{{ form.description or '' }}</textarea>
   </div>
   <div class="mb-3">
-    <label class="form-label" for="persona_prompt">Персона (необязательно)</label>
+    <label class="form-label" for="persona_prompt">{{ _("Персона (необязательно)") }}</label>
     <textarea class="form-control" id="persona_prompt" name="persona_prompt" rows="3" maxlength="4000"
-              placeholder="Отвечай как исследователь творчества Толстого…">{{ form.persona_prompt or '' }}</textarea>
-    <div class="form-text">Задаёт тон ответов. Правила «только по источникам» персона не отменяет.</div>
+              placeholder="{{ _('Отвечай как исследователь творчества Толстого…') }}">{{ form.persona_prompt or '' }}</textarea>
+    <div class="form-text">{{ _("Задаёт тон ответов. Правила «только по источникам» персона не отменяет.") }}</div>
   </div>
-  <button class="btn btn-primary" type="submit">Создать</button>
-  <a class="btn btn-link" href="/">Отмена</a>
+  <button class="btn btn-primary" type="submit">{{ _("Создать") }}</button>
+  <a class="btn btn-link" href="/">{{ _("Отмена") }}</a>
 </form>
 {% endblock %}

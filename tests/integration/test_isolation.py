@@ -476,7 +476,7 @@ async def test_foreign_eval_run_via_own_agent_is_not_found(
         ):
             r = await session.http.get(url, headers=session.hx())
             assert r.status_code == (200 if url.endswith(str(own.id)) else 404), url
-        assert "Прогонов пока нет" in r.text
+        assert "No runs yet" in r.text
     finally:
         await session.aclose()
 

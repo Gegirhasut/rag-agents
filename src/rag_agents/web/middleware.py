@@ -3,9 +3,10 @@ import time
 import uuid
 
 import structlog
+from starlette.requests import cookie_parser
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from rag_agents.core import metrics
+from rag_agents.core import i18n, metrics
 
 log = structlog.get_logger()
 
@@ -54,6 +55,8 @@ class RequestContextMiddleware:
         request_id = incoming if _VALID_ID.match(incoming) else uuid.uuid4().hex
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(request_id=request_id)
+        cookies = cookie_parser(dict(scope["headers"]).get(b"cookie", b"").decode("latin-1"))
+        i18n.set_lang(cookies.get(i18n.COOKIE))
         status = 500
         t0 = time.monotonic()
 

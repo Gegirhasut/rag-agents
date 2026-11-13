@@ -5,6 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
 
+from rag_agents.core.i18n import t
 from rag_agents.domain.insights import Period
 from rag_agents.services.errors import NotFoundError
 from rag_agents.services.insights import InsightsDisabledError, InsightsUnavailableError
@@ -62,7 +63,7 @@ async def trace_page(
     try:
         detail = await c.insights.trace(owner, trace_id)
     except NotFoundError as e:
-        raise HTTPException(404, "Трейс не найден") from e
+        raise HTTPException(404, t("Трейс не найден")) from e
     except InsightsDisabledError:
         return _unavailable(request)
     except InsightsUnavailableError as e:

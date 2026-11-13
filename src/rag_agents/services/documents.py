@@ -32,7 +32,11 @@ def detect_format(filename: str) -> SourceFormat:
     try:
         return format_by_name(filename)
     except UnsupportedFormatError as e:
-        raise ValidationError(str(e)) from e
+        suffix = PurePath(PurePath(filename).name.lower()).suffix
+        raise ValidationError(
+            "Неподдерживаемый формат: {suffix}. Можно: .txt, .fb2, .fb2.zip, .epub, .pdf, .docx",
+            suffix=suffix or "без расширения",
+        ) from e
 
 
 class DocumentService:
@@ -76,14 +80,14 @@ class DocumentService:
                 agent_id, document_id, fmt.value, chunks, self.settings.max_upload_bytes
             )
         except FileTooLargeError as e:
-            raise ValidationError(f"Файл больше {self.settings.max_upload_mb} МБ") from e
+            raise ValidationError("Файл больше {mb} МБ", mb=self.settings.max_upload_mb) from e
         if stored.size == 0:
             await self.storage.delete(stored.key)
             raise ValidationError("Файл пустой")
         head = await anyio.Path(self.storage.path(stored.key)).read_bytes()
         if not magic_matches(fmt, head[:_MAGIC_BYTES]):
             await self.storage.delete(stored.key)
-            raise ValidationError(f"Содержимое файла не похоже на {fmt.value.upper()}")
+            raise ValidationError("Содержимое файла не похоже на {fmt}", fmt=fmt.value.upper())
         await self.trace.emit(
             "upload.stored",
             "web",

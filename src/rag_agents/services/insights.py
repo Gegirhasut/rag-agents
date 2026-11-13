@@ -16,6 +16,7 @@ from uuid import UUID
 import structlog
 from redis.asyncio import Redis
 
+from rag_agents.core import i18n
 from rag_agents.core.db import Database
 from rag_agents.core.langfuse_api import LangfuseApiError, LangfuseRateLimitedError, LangfuseReader
 from rag_agents.domain.insights import (
@@ -149,7 +150,9 @@ class InsightsService:
         blocked = await self.redis.get(RATE_LIMIT_KEY)
         if isinstance(blocked, str):
             aw.close()  # корутина не будет выполнена — закрываем, чтобы не было warning
-            raise InsightsUnavailableError(f"Лимит API Langfuse исчерпан до {blocked} UTC")
+            raise InsightsUnavailableError(
+                i18n.t("Лимит API Langfuse исчерпан до {until} UTC", until=blocked)
+            )
         async with self._sem:
             try:
                 return await aw
@@ -157,7 +160,9 @@ class InsightsService:
                 until = e.reset_at.strftime("%d.%m %H:%M")
                 await self.redis.set(RATE_LIMIT_KEY, until, ex=max(e.retry_after_s, 1))
                 log.warning("insights.langfuse_rate_limited", until=until)
-                raise InsightsUnavailableError(f"Лимит API Langfuse исчерпан до {until} UTC") from e
+                raise InsightsUnavailableError(
+                    i18n.t("Лимит API Langfuse исчерпан до {until} UTC", until=until)
+                ) from e
             except LangfuseApiError as e:
                 log.warning("insights.langfuse_error", error=str(e))
                 raise InsightsUnavailableError(str(e)) from e

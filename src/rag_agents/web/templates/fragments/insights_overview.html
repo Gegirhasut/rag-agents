@@ -1,55 +1,55 @@
 {% from "macros.html" import trace_kind, feedback_badge %}
 {% set k = o.kpi %}
 <div class="d-flex justify-content-end mb-2">
-  <span class="small text-body-secondary">за {{ o.period.label }} · обновлено
-    <time datetime="{{ o.generated_at.isoformat() }}" data-fmt="time"></time> · раз в минуту · источник — наша БД</span>
+  <span class="small text-body-secondary">{{ _("за {period}", period=_(o.period.label)) }} · {{ _("обновлено") }}
+    <time datetime="{{ o.generated_at.isoformat() }}" data-fmt="time"></time> · {{ _("раз в минуту · источник — наша БД") }}</span>
 </div>
 
 {# ---------- KPI ---------- #}
 <div class="row g-3 mb-3">
   <div class="col-6 col-md-4 col-xl-2">
     <div class="card kpi h-100"><div class="card-body">
-      <div class="kpi-label">Вопросы</div>
+      <div class="kpi-label">{{ _("Вопросы") }}</div>
       <div class="kpi-value">{{ k.questions|num }}</div>
-      <div class="kpi-sub">{{ k.llm_calls|num }} вызовов LLM</div>
+      <div class="kpi-sub">{{ _("{n} вызовов LLM", n=k.llm_calls|num) }}</div>
     </div></div>
   </div>
   <div class="col-6 col-md-4 col-xl-2">
     <div class="card kpi h-100"><div class="card-body">
-      <div class="kpi-label">Стоимость</div>
+      <div class="kpi-label">{{ _("Стоимость") }}</div>
       <div class="kpi-value">{{ k.cost_usd|usd }}</div>
-      <div class="kpi-sub">{{ k.cost_per_question|usd }} за ответ</div>
+      <div class="kpi-sub">{{ _("{cost} за ответ", cost=k.cost_per_question|usd) }}</div>
     </div></div>
   </div>
   <div class="col-6 col-md-4 col-xl-2">
     <div class="card kpi h-100"><div class="card-body">
-      <div class="kpi-label">Ответ целиком</div>
+      <div class="kpi-label">{{ _("Ответ целиком") }}</div>
       <div class="kpi-value">{{ k.latency_p50_ms|ms }}</div>
       <div class="kpi-sub">p50 · p95 {{ k.latency_p95_ms|ms }}</div>
     </div></div>
   </div>
   <div class="col-6 col-md-4 col-xl-2">
     <div class="card kpi h-100"><div class="card-body">
-      <div class="kpi-label" title="Time to first token: от запроса к LLM до первого токена ответа">Первый токен</div>
+      <div class="kpi-label" title="{{ _('Time to first token: от запроса к LLM до первого токена ответа') }}">{{ _("Первый токен") }}</div>
       <div class="kpi-value">{{ k.ttft_p50_ms|ms }}</div>
       <div class="kpi-sub">p50 · p95 {{ k.ttft_p95_ms|ms }}</div>
     </div></div>
   </div>
   <div class="col-6 col-md-4 col-xl-2">
     <div class="card kpi h-100"><div class="card-body">
-      <div class="kpi-label">Оценки</div>
+      <div class="kpi-label">{{ _("Оценки") }}</div>
       <div class="kpi-value">{% if k.feedback_count %}{{ k.feedback_up_rate|pct }}{% else %}—{% endif %}</div>
       <div class="kpi-sub">👍 {{ k.feedback_up }} · 👎 {{ k.feedback_down }}</div>
       {% if k.feedback_count %}
-      <div class="meter mt-1" title="доля 👍"><span style="width: {{ (k.feedback_up_rate * 100)|round(1) }}%"></span></div>
+      <div class="meter mt-1" title="{{ _('доля 👍') }}"><span style="width: {{ (k.feedback_up_rate * 100)|round(1) }}%"></span></div>
       {% endif %}
     </div></div>
   </div>
   <div class="col-6 col-md-4 col-xl-2">
     <div class="card kpi h-100 {{ 'kpi-alert' if k.errors else '' }}"><div class="card-body">
-      <div class="kpi-label">Индексации · ошибки</div>
+      <div class="kpi-label">{{ _("Индексации · ошибки") }}</div>
       <div class="kpi-value">{{ k.ingests|num }} <span class="kpi-value-sub {{ 'text-danger' if k.errors else 'text-body-secondary' }}">· {{ k.errors }}</span></div>
-      <div class="kpi-sub">токены {{ k.input_tokens|num }} → {{ k.output_tokens|num }}</div>
+      <div class="kpi-sub">{{ _("токены") }} {{ k.input_tokens|num }} → {{ k.output_tokens|num }}</div>
     </div></div>
   </div>
 </div>
@@ -59,31 +59,31 @@
   <div class="col-lg-8">
     <div class="card h-100">
       <div class="card-header d-flex justify-content-between align-items-center">
-        <strong>Вопросы и стоимость</strong>
-        <span class="small text-body-secondary">по {{ 'часам' if o.period.granularity == 'hour' else 'дням' }} · ваше время</span>
+        <strong>{{ _("Вопросы и стоимость") }}</strong>
+        <span class="small text-body-secondary">{{ _('по часам') if o.period.granularity == 'hour' else _('по дням') }} · {{ _('ваше время') }}</span>
       </div>
       <div class="card-body">
         {% if o.series|selectattr('questions')|list %}
-        <div class="chart-box"><canvas id="series-chart" aria-label="Вопросы и стоимость по времени"></canvas></div>
+        <div class="chart-box"><canvas id="series-chart" aria-label="{{ _('Вопросы и стоимость по времени') }}"></canvas></div>
         <script type="application/json" id="series-data">{{ o.series|models_json }}</script>
         {% else %}
-        <p class="text-body-secondary small mb-0">За период вопросов не было.</p>
+        <p class="text-body-secondary small mb-0">{{ _("За период вопросов не было.") }}</p>
         {% endif %}
       </div>
     </div>
   </div>
   <div class="col-lg-4">
     <div class="card h-100">
-      <div class="card-header"><strong>Где тратится время</strong> <span class="small text-body-secondary">p50, риска — p95</span></div>
+      <div class="card-header"><strong>{{ _("Где тратится время") }}</strong> <span class="small text-body-secondary">{{ _("p50, риска — p95") }}</span></div>
       <div class="card-body">
         {% for group, title in [('query', 'Ответ на вопрос'), ('ingest', 'Индексация документа')] %}
           {% set rows = o.stages|selectattr('trace_name', 'equalto', group)|list %}
           {% if rows %}
           {% set top = rows|map(attribute='p95_ms')|map('default', 0, true)|max %}
-          <div class="small fw-semibold mb-1 {{ 'mt-3' if not loop.first else '' }}">{{ title }}</div>
+          <div class="small fw-semibold mb-1 {{ 'mt-3' if not loop.first else '' }}">{{ _(title) }}</div>
           {% for s in rows %}
-          <div class="stage" title="{{ s.name }}: {{ s.count }} шт., p50 {{ s.p50_ms|ms }}, p95 {{ s.p95_ms|ms }}">
-            <div class="stage-name">{{ s.name }}</div>
+          <div class="stage" title="{{ _(s.name) }}: {{ _("{n} шт.", n=s.count) }}, p50 {{ s.p50_ms|ms }}, p95 {{ s.p95_ms|ms }}">
+            <div class="stage-name">{{ _(s.name) }}</div>
             <div class="stage-track">
               <span class="stage-bar st-{{ group }}" style="width: {{ ((s.p50_ms or 0) / (top or 1) * 100)|round(1) }}%"></span>
               <span class="stage-p95" style="left: {{ ((s.p95_ms or 0) / (top or 1) * 100)|round(1) }}%"></span>
@@ -93,7 +93,7 @@
           {% endfor %}
           {% endif %}
         {% else %}
-          <p class="text-body-secondary small mb-0">Нет данных.</p>
+          <p class="text-body-secondary small mb-0">{{ _("Нет данных.") }}</p>
         {% endfor %}
       </div>
     </div>
@@ -102,18 +102,18 @@
 
 {# ---------- агенты ---------- #}
 <div class="card mb-3">
-  <div class="card-header"><strong>Агенты</strong></div>
+  <div class="card-header"><strong>{{ _("Агенты") }}</strong></div>
   <div class="table-responsive">
   <table class="table table-sm table-hover align-middle mb-0">
     <thead><tr>
-      <th>Агент</th><th class="text-end">Вопросы</th><th class="text-end">Стоимость</th>
-      <th class="text-end">Токены</th><th class="text-end">Ответ p50 / p95</th>
-      <th class="text-end">Первый токен</th><th class="ps-4" style="min-width: 10rem">Оценки</th>
+      <th>{{ _("Агент") }}</th><th class="text-end">{{ _("Вопросы") }}</th><th class="text-end">{{ _("Стоимость") }}</th>
+      <th class="text-end">{{ _("Токены") }}</th><th class="text-end">{{ _("Ответ p50 / p95") }}</th>
+      <th class="text-end">{{ _("Первый токен") }}</th><th class="ps-4" style="min-width: 10rem">{{ _("Оценки") }}</th>
     </tr></thead>
     <tbody>
     {% for a in o.agents %}
       <tr>
-        <td>{% if a.agent_id %}<a href="/agents/{{ a.agent_id }}">{{ a.name }}</a>{% else %}{{ a.name }} <span class="small text-body-secondary">(удалён)</span>{% endif %}</td>
+        <td>{% if a.agent_id %}<a href="/agents/{{ a.agent_id }}">{{ a.name }}</a>{% else %}{{ a.name }} <span class="small text-body-secondary">({{ _("удалён") }})</span>{% endif %}</td>
         <td class="text-end">{{ a.questions|num }}</td>
         <td class="text-end">{{ a.cost_usd|usd }}</td>
         <td class="text-end">{{ a.tokens|num }}</td>
@@ -125,11 +125,11 @@
             <div class="meter flex-grow-1"><span style="width: {{ (a.feedback_up_rate * 100)|round(1) }}%"></span></div>
             <span class="small text-nowrap">{{ a.feedback_up_rate|pct }} · {{ a.feedback_count }}</span>
           </div>
-          {% else %}<span class="small text-body-secondary">нет оценок</span>{% endif %}
+          {% else %}<span class="small text-body-secondary">{{ _("нет оценок") }}</span>{% endif %}
         </td>
       </tr>
     {% else %}
-      <tr><td colspan="7" class="text-body-secondary small">За период нет вопросов.</td></tr>
+      <tr><td colspan="7" class="text-body-secondary small">{{ _("За период нет вопросов.") }}</td></tr>
     {% endfor %}
     </tbody>
   </table>
@@ -139,8 +139,8 @@
 {# ---------- последние трейсы ---------- #}
 <div class="card mb-3">
   <div class="card-header d-flex justify-content-between align-items-center">
-    <strong>Последние запросы</strong>
-    <span class="small text-body-secondary">клик — дерево шагов, промпт и найденные чанки</span>
+    <strong>{{ _("Последние запросы") }}</strong>
+    <span class="small text-body-secondary">{{ _("клик — дерево шагов, промпт и найденные чанки") }}</span>
   </div>
   <div class="table-responsive">
   {% include "fragments/insights_trace_rows.html" %}
@@ -150,10 +150,10 @@
 {# ---------- модели ---------- #}
 {% if o.models %}
 <div class="card">
-  <div class="card-header"><strong>Модели LLM</strong></div>
+  <div class="card-header"><strong>{{ _("Модели LLM") }}</strong></div>
   <table class="table table-sm align-middle mb-0">
-    <thead><tr><th>Модель</th><th class="text-end">Вызовы</th><th class="text-end">Вход</th>
-      <th class="text-end">Выход</th><th class="text-end">Стоимость</th></tr></thead>
+    <thead><tr><th>{{ _("Модель") }}</th><th class="text-end">{{ _("Вызовы") }}</th><th class="text-end">{{ _("Вход", ctx="tokens") }}</th>
+      <th class="text-end">{{ _("Выход") }}</th><th class="text-end">{{ _("Стоимость") }}</th></tr></thead>
     <tbody>
     {% for m in o.models %}
       <tr><td><code>{{ m.model }}</code></td><td class="text-end">{{ m.calls|num }}</td>
@@ -162,6 +162,6 @@
     {% endfor %}
     </tbody>
   </table>
-  <div class="card-footer small text-body-secondary">Стоимость — по <code>configs/llm_prices.yaml</code> с учётом тарифов peak/off-peak DeepSeek; та же сумма уходит в Langfuse.</div>
+  <div class="card-footer small text-body-secondary">{{ _("Стоимость — по") }} <code>configs/llm_prices.yaml</code> {{ _("с учётом тарифов peak/off-peak DeepSeek; та же сумма уходит в Langfuse.") }}</div>
 </div>
 {% endif %}

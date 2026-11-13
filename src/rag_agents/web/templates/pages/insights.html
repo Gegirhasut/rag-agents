@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Аналитика — RAG-агенты{% endblock %}
+{% block title %}{{ _("Аналитика") }} — {{ _("RAG-агенты") }}{% endblock %}
 {% block head %}
 <link rel="stylesheet" href="/static/insights.css">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" defer></script>
@@ -9,15 +9,14 @@
 <div class="insights">
 <div class="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-3">
   <div>
-    <h1 class="h3 mb-1">📊 Аналитика</h1>
-    <p class="text-body-secondary mb-0">Стоимость, скорость и качество ответов. Сводка считается по нашей
-      базе, дерево шагов каждого запроса — из Langfuse по клику.</p>
+    <h1 class="h3 mb-1">📊 {{ _("Аналитика") }}</h1>
+    <p class="text-body-secondary mb-0">{{ _("Стоимость, скорость и качество ответов. Сводка считается по нашей базе, дерево шагов каждого запроса — из Langfuse по клику.") }}</p>
   </div>
   <div class="d-flex align-items-center gap-2">
-    <div class="btn-group btn-group-sm" role="group" aria-label="Период">
+    <div class="btn-group btn-group-sm" role="group" aria-label="{{ _('Период') }}">
       {% for p in periods %}
       <a class="btn {{ 'btn-primary' if p == period else 'btn-outline-primary' }}"
-         href="/insights?period={{ p.value }}">{{ p.label }}</a>
+         href="/insights?period={{ p.value }}">{{ _(p.label) }}</a>
       {% endfor %}
     </div>
     {% if project_url %}
