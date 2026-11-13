@@ -12,7 +12,7 @@ An agent is an isolated knowledge base with its own set of documents (txt, fb2, 
 
 *The "Under the hood" page: a question goes browser → web → Ollama (embedding) → Qdrant (search) → DeepSeek (generation) → PostgreSQL and Langfuse. On the right is the event log streamed from Redis pub/sub.*
 
-> The UI, code comments and design docs (`docs/`) are in Russian; commit messages and this README are in English.
+> The UI is in English by default, with an EN | RU switch in the top bar. Code comments and design docs (`docs/`) are in Russian; commit messages are in English.
 
 ## Why
 
@@ -137,7 +137,7 @@ make up      # build the image and start the stack; the first run downloads bge-
 make seed    # create the admin from SEED_USER_EMAIL / SEED_USER_PASSWORD
 ```
 
-Open <http://localhost:8080>, sign in, click «Создать агента» (Create agent), upload a document and ask a question. The files in [`tests/fixtures/`](tests/fixtures) work for a first try — the same text in different formats. Migrations are applied by the one-off `migrate` service on every `make up`.
+Open <http://localhost:8080>, sign in, click **Create agent**, upload a document and ask a question. The files in [`tests/fixtures/`](tests/fixtures) work for a first try — the same text in different formats. Migrations are applied by the one-off `migrate` service on every `make up`.
 
 Without `make`: `docker compose up -d --build`, then `docker compose exec web rag-agents user create you@example.com --admin`.
 
@@ -159,7 +159,7 @@ Users: `docker compose exec web rag-agents user create EMAIL [--admin]` (asks fo
 
 ## JSON API
 
-Issue a key in the UI on the «🔑 API-ключи» (API keys) page; it is shown once (only its hash is stored). Docs: <http://localhost:8080/api/docs>.
+Issue a key in the UI on the **🔑 API keys** page; it is shown once (only its hash is stored). Docs: <http://localhost:8080/api/docs>.
 
 ```bash
 KEY=rag_…
@@ -181,7 +181,7 @@ make metrics                                           # the stack's Prometheus 
 
 The golden dataset is [`eval/datasets/tolstoy.jsonl`](eval/datasets/tolstoy.jsonl): 59 questions over the demo corpus (facts, interpretation, multi-hop, out-of-corpus questions, prompt injection). Current baseline (dense retrieval, top-6): **hit@8 0.83 · recall@8 0.79 · MRR@10 0.57 · faithfulness 0.95 · refusal precision 0.93**.
 
-Tracing: set `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and `LANGFUSE_BASE_URL` in `.env` (without keys tracing is off and everything else works). Check the connection with `make langfuse-check`. The «📊 Аналитика» (Analytics) page computes cost and latency from the app's own database and pulls each request's step tree from Langfuse. More in [ARCHITECTURE §14](docs/ARCHITECTURE.md).
+Tracing: set `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and `LANGFUSE_BASE_URL` in `.env` (without keys tracing is off and everything else works). Check the connection with `make langfuse-check`. The **📊 Insights** page computes cost and latency from the app's own database and pulls each request's step tree from Langfuse. More in [ARCHITECTURE §14](docs/ARCHITECTURE.md).
 
 The model and reasoning depth are set in `.env`: `LLM_MODEL` (`deepseek-flash`, `deepseek-v4-pro`) and `LLM_REASONING_EFFORT` (`low` / `high` / `max`). Reasoning models get a separate token allowance, `LLM_REASONING_BUDGET_TOKENS` (4,000 by default), on top of the answer budget, so long reasoning doesn't cut the answer short. Apply changes with `docker compose up -d web`.
 
@@ -196,7 +196,7 @@ make test          # unit + integration on a separate compose.test.yaml (PG, Red
 make smoke         # e2e against the running stack: agent → upload → done → question → stream
 ```
 
-Code and architecture rules are in [CLAUDE.md](CLAUDE.md); step-by-step manual checks for each iteration are in [docs/MANUAL_TESTING.md](docs/MANUAL_TESTING.md) (both in Russian).
+Step-by-step manual checks for each iteration are in [docs/MANUAL_TESTING.md](docs/MANUAL_TESTING.md) (in Russian).
 
 ```
 src/rag_agents/
